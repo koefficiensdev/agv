@@ -1,7 +1,11 @@
-
 // Program.cs - Single file WinForms AGV Path Visualizer (C# 7.3)
-// Recommended target: .NET Framework 4.7.2+ or 4.8
-// Zoom + Pan added (mouse wheel zoom, middle/right drag pan)  //New
+// Target: .NET Framework 4.7.2+ or 4.8 (recommended)
+// Features:
+// - Load Nodes CSV (node,x,y)  (supports , ; tab delimiters)
+// - Load one/many AGV log CSVs (timestamp,node) (supports , ; tab delimiters)
+// - Visual map: nodes + paths + last position marker (draws even if only 1 point)
+// - Zoom (mouse wheel, zoom around cursor) + Pan (middle/right mouse drag)
+// - Optional auto-refresh using FileSystemWatcher (hourly overwritten logs)
 
 using System;
 using System.Collections.Generic;
@@ -44,12 +48,10 @@ namespace AgvPathViewer
         private readonly Button _btnLoadLogs;
         private readonly Button _btnClearLogs;
         private readonly CheckBox _chkAutoRefresh;
+        private readonly Button _btnResetView;
         private readonly Label _lblStatus;
-        private readonly Button _btnResetView; //New
 
         private readonly DoubleBufferedPictureBox _canvas;
-
-        // Debounce timer for file watcher bursts
         private readonly Timer _debounceTimer;
 
         // ---------------- Data ----------------
@@ -60,18 +62,18 @@ namespace AgvPathViewer
         private readonly List<FileSystemWatcher> _watchers = new List<FileSystemWatcher>();
         private bool _pendingRefresh;
 
-        // View transform
+        // World bounds
         private RectangleF _worldBounds = new RectangleF(0, 0, 1, 1);
         private const float PaddingWorld = 20f;
         private const int PaddingPx = 30;
         private const float NodeRadiusPx = 4.5f;
 
-        // Zoom/Pan state  //New
-        private float _zoom = 1.0f;                 //New: 1 = fit-to-view baseline
-        private PointF _panPx = new PointF(0, 0);   //New: pan offset in SCREEN pixels
-        private bool _panning = false;              //New
-        private Point _panStartMouse;               //New
-        private PointF _panStartPanPx;              //New
+        // Zoom/Pan state
+        private float _zoom = 1.0f;                 // 1 = fit-to-view baseline
+        private PointF _panPx = new PointF(0, 0);   // pan offset in SCREEN pixels
+        private bool _panning = false;
+        private Point _panStartMouse;
+        private PointF _panStartPanPx;
 
         public MainForm()
         {
@@ -109,27 +111,27 @@ namespace AgvPathViewer
             };
             _top.Controls.Add(_chkAutoRefresh);
 
-            _btnResetView = new Button { Text = "Reset View", Left = 690, Top = 12, Width = 100, Height = 30 }; //New
-            _btnResetView.Click += (s, e) => ResetView(); //New
-            _top.Controls.Add(_btnResetView); //New
+            _btnResetView = new Button { Text = "Reset View", Left = 690, Top = 12, Width = 100, Height = 30 };
+            _btnResetView.Click += (s, e) => ResetView();
+            _top.Controls.Add(_btnResetView);
 
             _lblStatus = new Label { Text = "Load nodes + logs to start.", Left = 800, Top = 18, AutoSize = true };
             _top.Controls.Add(_lblStatus);
 
-            _canvas = new DoubleBufferedPictureBox { Dock = DockStyle.Fill, BackColor = Color.White };
+            _canvas = new DoubleBufferedPictureBox { Dock = DockStyle.Fill, BackColor = Color.White, TabStop = true };
             _canvas.Paint += Canvas_Paint;
             _canvas.Resize += (s, e) => Redraw();
 
-            // Zoom + Pan mouse hooks  //New
-            _canvas.MouseWheel += Canvas_MouseWheel;   //New
-            _canvas.MouseDown += Canvas_MouseDown;     //New
-            _canvas.MouseMove += Canvas_MouseMove;     //New
-            _canvas.MouseUp += Canvas_MouseUp;         //New
-            _canvas.MouseEnter += (s, e) => _canvas.Focus(); //New: ensure wheel works
-            _canvas.TabStop = true; //New
+            // Zoom + Pan mouse hooks
+            _canvas.MouseWheel += Canvas_MouseWheel;
+            _canvas.MouseDown += Canvas_MouseDown;
+            _canvas.MouseMove += Canvas_MouseMove;
+            _canvas.MouseUp += Canvas_MouseUp;
+            _canvas.MouseEnter += (s, e) => _canvas.Focus(); // ensure wheel works
 
             Controls.Add(_canvas);
 
+            // Debounce timer for file watcher bursts
             _debounceTimer = new Timer { Interval = 350 };
             _debounceTimer.Tick += (s, e) =>
             {
@@ -149,68 +151,67 @@ namespace AgvPathViewer
         }
 
         // =========================
-        // Zoom/Pan helpers  //New
+        // Zoom / Pan
         // =========================
-        private void ResetView() //New
+        private void ResetView()
         {
-            _zoom = 1f; //New
-            _panPx = new PointF(0, 0); //New
-            Redraw(); //New
+            _zoom = 1f;
+            _panPx = new PointF(0, 0);
+            Redraw();
         }
 
-        private void Canvas_MouseWheel(object sender, MouseEventArgs e) //New
+        private void Canvas_MouseWheel(object sender, MouseEventArgs e)
         {
-            float oldZoom = _zoom; //New
-            float factor = (e.Delta > 0) ? 1.15f : (1f / 1.15f); //New
+            float oldZoom = _zoom;
+            float factor = (e.Delta > 0) ? 1.15f : (1f / 1.15f);
 
-            _zoom *= factor; //New
-            _zoom = Clamp(_zoom, 0.2f, 12f); //New
+            _zoom *= factor;
+            _zoom = Clamp(_zoom, 0.2f, 12f);
 
-            // Keep world point under cursor fixed (zoom around cursor) //New
-            var worldUnderMouse = ScreenToWorld(e.Location, oldZoom, _panPx); //New
-            var after = WorldToScreen(worldUnderMouse, _zoom, _panPx); //New
+            // zoom around cursor
+            var worldUnderMouse = ScreenToWorld(e.Location, oldZoom, _panPx);
+            var after = WorldToScreen(worldUnderMouse, _zoom, _panPx);
 
-            _panPx = new PointF( //New
+            _panPx = new PointF(
                 _panPx.X + (e.X - after.X),
                 _panPx.Y + (e.Y - after.Y)
             );
 
-            Redraw(); //New
+            Redraw();
         }
 
-        private void Canvas_MouseDown(object sender, MouseEventArgs e) //New
+        private void Canvas_MouseDown(object sender, MouseEventArgs e)
         {
-            // Middle mouse or Right mouse to pan //New
-            if (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right) //New
+            if (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right)
             {
-                _panning = true; //New
-                _panStartMouse = e.Location; //New
-                _panStartPanPx = _panPx; //New
-                _canvas.Cursor = Cursors.Hand; //New
+                _panning = true;
+                _panStartMouse = e.Location;
+                _panStartPanPx = _panPx;
+                _canvas.Cursor = Cursors.Hand;
             }
         }
 
-        private void Canvas_MouseMove(object sender, MouseEventArgs e) //New
+        private void Canvas_MouseMove(object sender, MouseEventArgs e)
         {
-            if (!_panning) return; //New
+            if (!_panning) return;
 
-            int dx = e.X - _panStartMouse.X; //New
-            int dy = e.Y - _panStartMouse.Y; //New
+            int dx = e.X - _panStartMouse.X;
+            int dy = e.Y - _panStartMouse.Y;
 
-            _panPx = new PointF(_panStartPanPx.X + dx, _panStartPanPx.Y + dy); //New
-            Redraw(); //New
+            _panPx = new PointF(_panStartPanPx.X + dx, _panStartPanPx.Y + dy);
+            Redraw();
         }
 
-        private void Canvas_MouseUp(object sender, MouseEventArgs e) //New
+        private void Canvas_MouseUp(object sender, MouseEventArgs e)
         {
-            if (_panning && (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right)) //New
+            if (_panning && (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right))
             {
-                _panning = false; //New
-                _canvas.Cursor = Cursors.Default; //New
+                _panning = false;
+                _canvas.Cursor = Cursors.Default;
             }
         }
 
-        private static float Clamp(float v, float min, float max) //New
+        private static float Clamp(float v, float min, float max)
         {
             if (v < min) return min;
             if (v > max) return max;
@@ -234,7 +235,7 @@ namespace AgvPathViewer
                 {
                     _nodes = ParseNodesCsv(ofd.FileName);
                     ComputeWorldBounds();
-                    ResetView(); //New: keep fit-to-view baseline after new bounds
+                    ResetView();
                     UpdateStatus("Nodes loaded: " + _nodes.Count + " from " + Path.GetFileName(ofd.FileName));
                     Redraw();
                 }
@@ -269,6 +270,7 @@ namespace AgvPathViewer
                     {
                         var agvName = Path.GetFileNameWithoutExtension(file);
 
+                        // Replace if already loaded
                         _series.RemoveAll(x => StringComparer.OrdinalIgnoreCase.Equals(x.FilePath, file));
 
                         var points = ParseAgvLogCsv(file, _nodes);
@@ -283,7 +285,8 @@ namespace AgvPathViewer
 
                     AssignColors();
                     ComputeWorldBounds();
-                    ResetView(); //New: show all after loading logs (optional but handy)
+                    ResetView();
+
                     UpdateStatus("Logs loaded: " + _series.Count + " file(s). Total points: " + _series.Sum(s => s.Points.Count));
                     Redraw();
 
@@ -291,6 +294,7 @@ namespace AgvPathViewer
                 }
                 catch (Exception ex)
                 {
+                    // IMPORTANT: ParseAgvLogCsv will throw detailed reasons if it ends up with 0 points
                     MessageBox.Show(this, "Failed to load AGV log CSV(s):\n\n" + ex.Message, "Error",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
@@ -320,158 +324,27 @@ namespace AgvPathViewer
             }
 
             ComputeWorldBounds();
-            // NOTE: Don't ResetView here, otherwise it will "snap back" while user is zoomed/panned  //New
+            // do NOT ResetView here (would snap zoom/pan while user is viewing)
             UpdateStatus("Auto-refreshed " + reloaded + " file(s). Total points: " + totalPoints);
             Redraw();
         }
 
         // =========================
-        // CSV parsing
+        // CSV parsing (supports , ; tab)
         // =========================
-        private static Dictionary<string, PointF> ParseNodesCsv(string path)
+        private static char DetectDelimiter(string line)
         {
-            var lines = File.ReadAllLines(path);
-            if (lines.Length < 2) throw new Exception("Nodes CSV must have a header and at least 1 data row.");
+            if (string.IsNullOrEmpty(line)) return ',';
+            int commas = line.Count(c => c == ',');
+            int semis = line.Count(c => c == ';');
+            int tabs = line.Count(c => c == '\t');
 
-            var header = SplitCsvLine(lines[0]);
-            int iNode = FindCol(header, "node", "node_id", "id");
-            int iX = FindCol(header, "x", "posx", "coordx");
-            int iY = FindCol(header, "y", "posy", "coordy");
-
-            if (iNode < 0 || iX < 0 || iY < 0)
-                throw new Exception("Nodes CSV header must include columns: node,x,y (or aliases node_id/id, posx/coordx, posy/coordy).");
-
-            var dict = new Dictionary<string, PointF>(StringComparer.OrdinalIgnoreCase);
-
-            for (int r = 1; r < lines.Length; r++)
-            {
-                if (string.IsNullOrWhiteSpace(lines[r])) continue;
-                var cols = SplitCsvLine(lines[r]);
-                if (cols.Length <= Math.Max(iNode, Math.Max(iX, iY))) continue;
-
-                var nodeId = (cols[iNode] ?? "").Trim();
-                if (string.IsNullOrEmpty(nodeId)) continue;
-
-                float x = ParseFloat(cols[iX]);
-                float y = ParseFloat(cols[iY]);
-
-                dict[nodeId] = new PointF(x, y);
-            }
-
-            if (dict.Count == 0) throw new Exception("No nodes parsed from nodes CSV.");
-            return dict;
+            if (semis >= commas && semis >= tabs && semis > 0) return ';';
+            if (tabs >= commas && tabs >= semis && tabs > 0) return '\t';
+            return ',';
         }
 
-        private static List<AgvPoint> ParseAgvLogCsv(string path, Dictionary<string, PointF> nodes)
-        {
-            string[] lines;
-            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
-            using (var sr = new StreamReader(fs, Encoding.UTF8, true))
-            {
-                var all = sr.ReadToEnd();
-                lines = all.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
-            }
-
-            var nonEmpty = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
-            if (nonEmpty.Length < 2) return new List<AgvPoint>();
-
-            var header = SplitCsvLine(nonEmpty[0]);
-
-            int iTs = FindCol(header, "timestamp", "time", "datetime", "ts");
-            int iNode = FindCol(header, "node", "node_id", "id");
-
-            if (iTs < 0 || iNode < 0)
-                throw new Exception("Log CSV '" + Path.GetFileName(path) + "' must include columns: timestamp,node (or aliases).");
-
-            var list = new List<AgvPoint>();
-
-            for (int r = 1; r < nonEmpty.Length; r++)
-            {
-                var cols = SplitCsvLine(nonEmpty[r]);
-                if (cols.Length <= Math.Max(iTs, iNode)) continue;
-
-                var tsStr = (cols[iTs] ?? "").Trim();
-                var nodeId = (cols[iNode] ?? "").Trim();
-                if (string.IsNullOrEmpty(nodeId)) continue;
-
-                PointF xy;
-                if (!nodes.TryGetValue(nodeId, out xy))
-                    continue;
-
-                DateTime ts;
-                if (!TryParseDate(tsStr, out ts))
-                    continue;
-
-                list.Add(new AgvPoint { Time = ts, NodeId = nodeId, XY = xy });
-            }
-
-            list.Sort((a, b) => a.Time.CompareTo(b.Time));
-
-            var compressed = new List<AgvPoint>(list.Count);
-            string last = null;
-            for (int i = 0; i < list.Count; i++)
-            {
-                if (!string.Equals(last, list[i].NodeId, StringComparison.OrdinalIgnoreCase))
-                {
-                    compressed.Add(list[i]);
-                    last = list[i].NodeId;
-                }
-            }
-
-            return compressed;
-        }
-
-        private static bool TryParseDate(string s, out DateTime dt)
-        {
-            var formats = new[]
-            {
-                "yyyy-MM-dd HH:mm:ss",
-                "yyyy-MM-dd HH:mm:ss.fff",
-                "yyyy/MM/dd HH:mm:ss",
-                "yyyy.MM.dd HH:mm:ss",
-                "dd.MM.yyyy HH:mm:ss",
-                "dd/MM/yyyy HH:mm:ss",
-                "MM/dd/yyyy HH:mm:ss",
-                "yyyy-MM-ddTHH:mm:ss",
-                "yyyy-MM-ddTHH:mm:ss.fff"
-            };
-
-            if (DateTime.TryParseExact(s, formats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out dt))
-                return true;
-
-            return DateTime.TryParse(s, CultureInfo.CurrentCulture, DateTimeStyles.AssumeLocal, out dt)
-                || DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out dt);
-        }
-
-        private static float ParseFloat(string s)
-        {
-            s = (s ?? "").Trim();
-            float f;
-
-            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out f)) return f;
-            if (float.TryParse(s, NumberStyles.Float, CultureInfo.CurrentCulture, out f)) return f;
-
-            s = s.Replace(',', '.');
-            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out f)) return f;
-
-            throw new Exception("Could not parse float: " + s);
-        }
-
-        private static int FindCol(string[] header, params string[] names)
-        {
-            for (int i = 0; i < header.Length; i++)
-            {
-                var h = (header[i] ?? "").Trim().Trim('"').ToLowerInvariant();
-                for (int j = 0; j < names.Length; j++)
-                {
-                    if (h == names[j].ToLowerInvariant())
-                        return i;
-                }
-            }
-            return -1;
-        }
-
-        private static string[] SplitCsvLine(string line)
+        private static string[] SplitCsvLine(string line, char delimiter)
         {
             if (line == null) return new string[0];
 
@@ -495,7 +368,7 @@ namespace AgvPathViewer
                         inQuotes = !inQuotes;
                     }
                 }
-                else if (c == ',' && !inQuotes)
+                else if (c == delimiter && !inQuotes)
                 {
                     result.Add(sb.ToString());
                     sb.Clear();
@@ -508,6 +381,199 @@ namespace AgvPathViewer
 
             result.Add(sb.ToString());
             return result.ToArray();
+        }
+
+        private static int FindCol(string[] header, params string[] names)
+        {
+            for (int i = 0; i < header.Length; i++)
+            {
+                var hRaw = (header[i] ?? "");
+                var h = hRaw.Trim().Trim('"').Trim('\uFEFF').ToLowerInvariant();
+                var hNorm = new string(h.Where(ch => ch != ' ' && ch != '_' && ch != '-').ToArray());
+
+                for (int j = 0; j < names.Length; j++)
+                {
+                    var n = names[j].ToLowerInvariant();
+                    var nNorm = new string(n.Where(ch => ch != ' ' && ch != '_' && ch != '-').ToArray());
+
+                    if (h == n || hNorm == nNorm)
+                        return i;
+                }
+            }
+            return -1;
+        }
+
+        private static Dictionary<string, PointF> ParseNodesCsv(string path)
+        {
+            var lines = File.ReadAllLines(path);
+            if (lines.Length < 2) throw new Exception("Nodes CSV must have a header and at least 1 data row.");
+
+            char delim = DetectDelimiter(lines[0]);
+            var header = SplitCsvLine(lines[0], delim);
+
+            int iNode = FindCol(header, "node", "nodeid", "node_id", "id", "name");
+            int iX = FindCol(header, "x", "posx", "coordx", "xcoord");
+            int iY = FindCol(header, "y", "posy", "coordy", "ycoord");
+
+            if (iNode < 0 || iX < 0 || iY < 0)
+                throw new Exception(
+                    "Nodes CSV header not recognized.\n\n" +
+                    "Found columns: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]\n" +
+                    "Expected something like: node,x,y (delimiter may be ';' or ',')."
+                );
+
+            var dict = new Dictionary<string, PointF>(StringComparer.OrdinalIgnoreCase);
+
+            for (int r = 1; r < lines.Length; r++)
+            {
+                if (string.IsNullOrWhiteSpace(lines[r])) continue;
+                var cols = SplitCsvLine(lines[r], delim);
+                if (cols.Length <= Math.Max(iNode, Math.Max(iX, iY))) continue;
+
+                var nodeId = (cols[iNode] ?? "").Trim().Trim('"').Trim();
+                if (string.IsNullOrEmpty(nodeId)) continue;
+
+                float x = ParseFloat(cols[iX]);
+                float y = ParseFloat(cols[iY]);
+
+                dict[nodeId] = new PointF(x, y);
+            }
+
+            if (dict.Count == 0) throw new Exception("No nodes parsed from nodes CSV.");
+            return dict;
+        }
+
+        private static List<AgvPoint> ParseAgvLogCsv(string path, Dictionary<string, PointF> nodes)
+        {
+            // Robust read even if file is being written
+            string[] lines;
+            using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var sr = new StreamReader(fs, Encoding.UTF8, true))
+            {
+                var all = sr.ReadToEnd();
+                lines = all.Split(new[] { "\r\n", "\n" }, StringSplitOptions.None);
+            }
+
+            var nonEmpty = lines.Where(l => !string.IsNullOrWhiteSpace(l)).ToArray();
+            if (nonEmpty.Length < 2) return new List<AgvPoint>();
+
+            char delim = DetectDelimiter(nonEmpty[0]);
+            var header = SplitCsvLine(nonEmpty[0], delim);
+
+            int iTs = FindCol(header, "timestamp", "time", "datetime", "ts", "date", "datum", "ido", "idopont");
+            int iNode = FindCol(header, "node", "nodeid", "node_id", "id", "csomopont", "allomas");
+
+            if (iTs < 0 || iNode < 0)
+                throw new Exception(
+                    "Log CSV '" + Path.GetFileName(path) + "' header not recognized.\n\n" +
+                    "Delimiter detected: '" + (delim == '\t' ? "\\t" : delim.ToString()) + "'\n" +
+                    "Found columns: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]\n" +
+                    "Expected something like: timestamp,node (or HU-like date/node columns)."
+                );
+
+            // debug counters (to explain 0 pts)
+            int totalRows = 0;
+            int shortRow = 0;
+            int emptyNode = 0;
+            int unknownNode = 0;
+            int badDate = 0;
+
+            var list = new List<AgvPoint>();
+
+            for (int r = 1; r < nonEmpty.Length; r++)
+            {
+                var cols = SplitCsvLine(nonEmpty[r], delim);
+                totalRows++;
+
+                if (cols.Length <= Math.Max(iTs, iNode)) { shortRow++; continue; }
+
+                var tsStr = (cols[iTs] ?? "").Trim().Trim('"').Trim();
+                var nodeId = (cols[iNode] ?? "").Trim().Trim('"').Trim();
+
+                if (string.IsNullOrEmpty(nodeId)) { emptyNode++; continue; }
+
+                PointF xy;
+                if (!nodes.TryGetValue(nodeId, out xy)) { unknownNode++; continue; }
+
+                DateTime ts;
+                if (!TryParseDate(tsStr, out ts)) { badDate++; continue; }
+
+                list.Add(new AgvPoint { Time = ts, NodeId = nodeId, XY = xy });
+            }
+
+            list.Sort((a, b) => a.Time.CompareTo(b.Time));
+
+            // compress consecutive duplicates (keeps path clean). If you want every row, return list instead.
+            var compressed = new List<AgvPoint>(list.Count);
+            string last = null;
+            for (int i = 0; i < list.Count; i++)
+            {
+                if (!string.Equals(last, list[i].NodeId, StringComparison.OrdinalIgnoreCase))
+                {
+                    compressed.Add(list[i]);
+                    last = list[i].NodeId;
+                }
+            }
+
+            if (compressed.Count == 0)
+            {
+                throw new Exception(
+                    "0 points parsed from '" + Path.GetFileName(path) + "'.\n\n" +
+                    "Delimiter detected: '" + (delim == '\t' ? "\\t" : delim.ToString()) + "'\n" +
+                    "Rows read: " + totalRows + "\n" +
+                    "Skipped: shortRow=" + shortRow +
+                    ", emptyNode=" + emptyNode +
+                    ", unknownNode=" + unknownNode +
+                    ", badDate=" + badDate + "\n\n" +
+                    "Most common fixes:\n" +
+                    "- Node IDs in log must exist in nodes.csv (unknownNode > 0 means mismatch)\n" +
+                    "- Timestamp format must be parseable (badDate > 0 means date format issue)\n" +
+                    "- CSV delimiter should be ',' or ';' (auto-detected here)"
+                );
+            }
+
+            return compressed;
+        }
+
+        private static bool TryParseDate(string s, out DateTime dt)
+        {
+            var formats = new[]
+            {
+                "yyyy-MM-dd HH:mm:ss",
+                "yyyy-MM-dd HH:mm:ss.fff",
+                "yyyy-MM-dd HH:mm:ss,fff",
+                "yyyy/MM/dd HH:mm:ss",
+                "yyyy.MM.dd HH:mm:ss",
+                "yyyy.MM.dd HH:mm:ss.fff",
+                "yyyy.MM.dd HH:mm:ss,fff",
+                "dd.MM.yyyy HH:mm:ss",
+                "dd.MM.yyyy HH:mm:ss.fff",
+                "dd.MM.yyyy HH:mm:ss,fff",
+                "dd/MM/yyyy HH:mm:ss",
+                "MM/dd/yyyy HH:mm:ss",
+                "yyyy-MM-ddTHH:mm:ss",
+                "yyyy-MM-ddTHH:mm:ss.fff"
+            };
+
+            if (DateTime.TryParseExact(s, formats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out dt))
+                return true;
+
+            return DateTime.TryParse(s, CultureInfo.CurrentCulture, DateTimeStyles.AssumeLocal, out dt)
+                   || DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out dt);
+        }
+
+        private static float ParseFloat(string s)
+        {
+            s = (s ?? "").Trim().Trim('"').Trim();
+            float f;
+
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out f)) return f;
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.CurrentCulture, out f)) return f;
+
+            s = s.Replace(',', '.');
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out f)) return f;
+
+            throw new Exception("Could not parse float: " + s);
         }
 
         // =========================
@@ -635,7 +701,6 @@ namespace AgvPathViewer
                 DrawSeriesPath(g, _series[i]);
 
             DrawNodes(g);
-
             DrawLegend(g);
         }
 
@@ -671,11 +736,19 @@ namespace AgvPathViewer
 
         private void DrawSeriesPath(Graphics g, AgvSeries s)
         {
-            if (s.Points == null || s.Points.Count < 2) return;
+            if (s.Points == null || s.Points.Count == 0) return;
 
             using (var pen = new Pen(s.Color, 2.2f))
             using (var headBrush = new SolidBrush(s.Color))
             {
+                // draw even if only 1 point
+                if (s.Points.Count == 1)
+                {
+                    var only = WorldToScreen(s.Points[0].XY);
+                    g.FillEllipse(headBrush, only.X - 6, only.Y - 6, 12, 12);
+                    return;
+                }
+
                 PointF prev = WorldToScreen(s.Points[0].XY);
                 for (int i = 1; i < s.Points.Count; i++)
                 {
@@ -704,20 +777,19 @@ namespace AgvPathViewer
                         g.FillRectangle(b, x, y + 4, 14, 14);
 
                     g.DrawRectangle(Pens.Black, x, y + 4, 14, 14);
-
                     g.DrawString(s.Name + " (" + s.Points.Count + " pts)", font, Brushes.Black, x + 22, y + 2);
                     y += 22;
                 }
             }
         }
 
-        // World->Screen with zoom + pan  //New
-        private PointF WorldToScreen(PointF w) //New (updated)
+        // World->Screen with zoom + pan
+        private PointF WorldToScreen(PointF w)
         {
-            return WorldToScreen(w, _zoom, _panPx); //New
+            return WorldToScreen(w, _zoom, _panPx);
         }
 
-        private PointF WorldToScreen(PointF w, float zoom, PointF panPx) //New
+        private PointF WorldToScreen(PointF w, float zoom, PointF panPx)
         {
             var rect = _worldBounds;
 
@@ -741,12 +813,11 @@ namespace AgvPathViewer
 
             float x = ox + (w.X - rect.Left) * s + panPx.X;
             float y = oy + (rect.Bottom - w.Y) * s + panPx.Y; // flip Y
-
             return new PointF(x, y);
         }
 
-        // Screen->World for zoom-around-cursor  //New
-        private PointF ScreenToWorld(Point screenPt, float zoom, PointF panPx) //New
+        // Screen->World for zoom-around-cursor
+        private PointF ScreenToWorld(Point screenPt, float zoom, PointF panPx)
         {
             var rect = _worldBounds;
 
@@ -770,7 +841,6 @@ namespace AgvPathViewer
 
             float x = (screenPt.X - ox - panPx.X) / s + rect.Left;
             float y = rect.Bottom - ((screenPt.Y - oy - panPx.Y) / s);
-
             return new PointF(x, y);
         }
 
