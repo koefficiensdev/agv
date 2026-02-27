@@ -1,12 +1,3 @@
-// Program.cs - Single file WinForms AGV Path Visualizer (C# 7.3)
-// Target: .NET Framework 4.7.2+ or 4.8 (recommended)
-// Features:
-// - Load Nodes CSV (node,x,y)  (supports , ; tab delimiters)
-// - Load one/many AGV log CSVs (timestamp,node) (supports , ; tab delimiters)
-// - Visual map: nodes + paths + last position marker (draws even if only 1 point)
-// - Zoom (mouse wheel, zoom around cursor) + Pan (middle/right mouse drag)
-// - Optional auto-refresh using FileSystemWatcher (hourly overwritten logs)
-
 using System;
 using System.Collections.Generic;
 using System.Drawing;
@@ -30,7 +21,6 @@ namespace AgvPathViewer
         }
     }
 
-    // Double-buffered canvas to avoid flicker
     public sealed class DoubleBufferedPictureBox : PictureBox
     {
         public DoubleBufferedPictureBox()
@@ -42,7 +32,6 @@ namespace AgvPathViewer
 
     public sealed class MainForm : Form
     {
-        // ---------------- UI ----------------
         private readonly Panel _top;
         private readonly Button _btnLoadNodes;
         private readonly Button _btnLoadLogs;
@@ -54,23 +43,19 @@ namespace AgvPathViewer
         private readonly DoubleBufferedPictureBox _canvas;
         private readonly Timer _debounceTimer;
 
-        // ---------------- Data ----------------
         private Dictionary<string, PointF> _nodes = new Dictionary<string, PointF>(StringComparer.OrdinalIgnoreCase);
         private readonly List<AgvSeries> _series = new List<AgvSeries>();
 
-        // Watching updated logs
         private readonly List<FileSystemWatcher> _watchers = new List<FileSystemWatcher>();
         private bool _pendingRefresh;
 
-        // World bounds
         private RectangleF _worldBounds = new RectangleF(0, 0, 1, 1);
         private const float PaddingWorld = 20f;
         private const int PaddingPx = 30;
         private const float NodeRadiusPx = 4.5f;
 
-        // Zoom/Pan state
-        private float _zoom = 1.0f;                 // 1 = fit-to-view baseline
-        private PointF _panPx = new PointF(0, 0);   // pan offset in SCREEN pixels
+        private float _zoom = 1.0f;
+        private PointF _panPx = new PointF(0, 0);
         private bool _panning = false;
         private Point _panStartMouse;
         private PointF _panStartPanPx;
@@ -122,16 +107,14 @@ namespace AgvPathViewer
             _canvas.Paint += Canvas_Paint;
             _canvas.Resize += (s, e) => Redraw();
 
-            // Zoom + Pan mouse hooks
             _canvas.MouseWheel += Canvas_MouseWheel;
             _canvas.MouseDown += Canvas_MouseDown;
             _canvas.MouseMove += Canvas_MouseMove;
             _canvas.MouseUp += Canvas_MouseUp;
-            _canvas.MouseEnter += (s, e) => _canvas.Focus(); // ensure wheel works
+            _canvas.MouseEnter += (s, e) => _canvas.Focus();
 
             Controls.Add(_canvas);
 
-            // Debounce timer for file watcher bursts
             _debounceTimer = new Timer { Interval = 350 };
             _debounceTimer.Tick += (s, e) =>
             {
@@ -150,9 +133,6 @@ namespace AgvPathViewer
             base.OnFormClosed(e);
         }
 
-        // =========================
-        // Zoom / Pan
-        // =========================
         private void ResetView()
         {
             _zoom = 1f;
@@ -168,7 +148,6 @@ namespace AgvPathViewer
             _zoom *= factor;
             _zoom = Clamp(_zoom, 0.2f, 12f);
 
-            // zoom around cursor
             var worldUnderMouse = ScreenToWorld(e.Location, oldZoom, _panPx);
             var after = WorldToScreen(worldUnderMouse, _zoom, _panPx);
 
@@ -218,9 +197,6 @@ namespace AgvPathViewer
             return v;
         }
 
-        // =========================
-        // Loading CSVs
-        // =========================
         private void LoadNodesCsv()
         {
             using (var ofd = new OpenFileDialog())
@@ -251,8 +227,7 @@ namespace AgvPathViewer
         {
             if (_nodes.Count == 0)
             {
-                MessageBox.Show(this, "Load Nodes CSV first (so node IDs can be mapped to X/Y).",
-                    "Missing nodes", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, "Load Nodes CSV first.", "Missing nodes", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -269,11 +244,9 @@ namespace AgvPathViewer
                     foreach (var file in ofd.FileNames)
                     {
                         var agvName = Path.GetFileNameWithoutExtension(file);
-
-                        // Replace if already loaded
                         _series.RemoveAll(x => StringComparer.OrdinalIgnoreCase.Equals(x.FilePath, file));
 
-                        var points = ParseAgvLogCsv(file, _nodes);
+                        var points = ParseAgvLogCsv_NoDate(file, _nodes);
 
                         _series.Add(new AgvSeries
                         {
@@ -294,7 +267,6 @@ namespace AgvPathViewer
                 }
                 catch (Exception ex)
                 {
-                    // IMPORTANT: ParseAgvLogCsv will throw detailed reasons if it ends up with 0 points
                     MessageBox.Show(this, "Failed to load AGV log CSV(s):\n\n" + ex.Message, "Error",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
@@ -313,25 +285,20 @@ namespace AgvPathViewer
                 try
                 {
                     if (!File.Exists(s.FilePath)) continue;
-                    s.Points = ParseAgvLogCsv(s.FilePath, _nodes);
+                    s.Points = ParseAgvLogCsv_NoDate(s.FilePath, _nodes);
                     reloaded++;
                     totalPoints += s.Points.Count;
                 }
                 catch
                 {
-                    // ignore individual file errors on auto refresh
                 }
             }
 
             ComputeWorldBounds();
-            // do NOT ResetView here (would snap zoom/pan while user is viewing)
             UpdateStatus("Auto-refreshed " + reloaded + " file(s). Total points: " + totalPoints);
             Redraw();
         }
 
-        // =========================
-        // CSV parsing (supports , ; tab)
-        // =========================
         private static char DetectDelimiter(string line)
         {
             if (string.IsNullOrEmpty(line)) return ',';
@@ -418,8 +385,7 @@ namespace AgvPathViewer
             if (iNode < 0 || iX < 0 || iY < 0)
                 throw new Exception(
                     "Nodes CSV header not recognized.\n\n" +
-                    "Found columns: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]\n" +
-                    "Expected something like: node,x,y (delimiter may be ';' or ',')."
+                    "Found columns: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]"
                 );
 
             var dict = new Dictionary<string, PointF>(StringComparer.OrdinalIgnoreCase);
@@ -443,9 +409,8 @@ namespace AgvPathViewer
             return dict;
         }
 
-        private static List<AgvPoint> ParseAgvLogCsv(string path, Dictionary<string, PointF> nodes)
+        private static List<AgvPoint> ParseAgvLogCsv_NoDate(string path, Dictionary<string, PointF> nodes)
         {
-            // Robust read even if file is being written
             string[] lines;
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             using (var sr = new StreamReader(fs, Encoding.UTF8, true))
@@ -460,50 +425,39 @@ namespace AgvPathViewer
             char delim = DetectDelimiter(nonEmpty[0]);
             var header = SplitCsvLine(nonEmpty[0], delim);
 
-            int iTs = FindCol(header, "timestamp", "time", "datetime", "ts", "date", "datum", "ido", "idopont");
             int iNode = FindCol(header, "node", "nodeid", "node_id", "id", "csomopont", "allomas");
-
-            if (iTs < 0 || iNode < 0)
+            if (iNode < 0)
                 throw new Exception(
                     "Log CSV '" + Path.GetFileName(path) + "' header not recognized.\n\n" +
-                    "Delimiter detected: '" + (delim == '\t' ? "\\t" : delim.ToString()) + "'\n" +
                     "Found columns: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]\n" +
-                    "Expected something like: timestamp,node (or HU-like date/node columns)."
+                    "Need a node column (node/node_id/id/csomopont)."
                 );
 
-            // debug counters (to explain 0 pts)
             int totalRows = 0;
             int shortRow = 0;
             int emptyNode = 0;
             int unknownNode = 0;
-            int badDate = 0;
 
             var list = new List<AgvPoint>();
+            int step = 0;
 
             for (int r = 1; r < nonEmpty.Length; r++)
             {
                 var cols = SplitCsvLine(nonEmpty[r], delim);
                 totalRows++;
 
-                if (cols.Length <= Math.Max(iTs, iNode)) { shortRow++; continue; }
+                if (cols.Length <= iNode) { shortRow++; continue; }
 
-                var tsStr = (cols[iTs] ?? "").Trim().Trim('"').Trim();
                 var nodeId = (cols[iNode] ?? "").Trim().Trim('"').Trim();
-
                 if (string.IsNullOrEmpty(nodeId)) { emptyNode++; continue; }
 
                 PointF xy;
                 if (!nodes.TryGetValue(nodeId, out xy)) { unknownNode++; continue; }
 
-                DateTime ts;
-                if (!TryParseDate(tsStr, out ts)) { badDate++; continue; }
-
-                list.Add(new AgvPoint { Time = ts, NodeId = nodeId, XY = xy });
+                step++;
+                list.Add(new AgvPoint { Step = step, NodeId = nodeId, XY = xy });
             }
 
-            list.Sort((a, b) => a.Time.CompareTo(b.Time));
-
-            // compress consecutive duplicates (keeps path clean). If you want every row, return list instead.
             var compressed = new List<AgvPoint>(list.Count);
             string last = null;
             for (int i = 0; i < list.Count; i++)
@@ -519,47 +473,13 @@ namespace AgvPathViewer
             {
                 throw new Exception(
                     "0 points parsed from '" + Path.GetFileName(path) + "'.\n\n" +
-                    "Delimiter detected: '" + (delim == '\t' ? "\\t" : delim.ToString()) + "'\n" +
                     "Rows read: " + totalRows + "\n" +
-                    "Skipped: shortRow=" + shortRow +
-                    ", emptyNode=" + emptyNode +
-                    ", unknownNode=" + unknownNode +
-                    ", badDate=" + badDate + "\n\n" +
-                    "Most common fixes:\n" +
-                    "- Node IDs in log must exist in nodes.csv (unknownNode > 0 means mismatch)\n" +
-                    "- Timestamp format must be parseable (badDate > 0 means date format issue)\n" +
-                    "- CSV delimiter should be ',' or ';' (auto-detected here)"
+                    "Skipped: shortRow=" + shortRow + ", emptyNode=" + emptyNode + ", unknownNode=" + unknownNode + "\n\n" +
+                    "This means node IDs in the log do not match nodes.csv, or the node column is wrong."
                 );
             }
 
             return compressed;
-        }
-
-        private static bool TryParseDate(string s, out DateTime dt)
-        {
-            var formats = new[]
-            {
-                "yyyy-MM-dd HH:mm:ss",
-                "yyyy-MM-dd HH:mm:ss.fff",
-                "yyyy-MM-dd HH:mm:ss,fff",
-                "yyyy/MM/dd HH:mm:ss",
-                "yyyy.MM.dd HH:mm:ss",
-                "yyyy.MM.dd HH:mm:ss.fff",
-                "yyyy.MM.dd HH:mm:ss,fff",
-                "dd.MM.yyyy HH:mm:ss",
-                "dd.MM.yyyy HH:mm:ss.fff",
-                "dd.MM.yyyy HH:mm:ss,fff",
-                "dd/MM/yyyy HH:mm:ss",
-                "MM/dd/yyyy HH:mm:ss",
-                "yyyy-MM-ddTHH:mm:ss",
-                "yyyy-MM-ddTHH:mm:ss.fff"
-            };
-
-            if (DateTime.TryParseExact(s, formats, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out dt))
-                return true;
-
-            return DateTime.TryParse(s, CultureInfo.CurrentCulture, DateTimeStyles.AssumeLocal, out dt)
-                   || DateTime.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.AssumeLocal, out dt);
         }
 
         private static float ParseFloat(string s)
@@ -576,9 +496,6 @@ namespace AgvPathViewer
             throw new Exception("Could not parse float: " + s);
         }
 
-        // =========================
-        // File watching
-        // =========================
         private void StartWatchers()
         {
             StopWatchers();
@@ -604,7 +521,9 @@ namespace AgvPathViewer
                     w.EnableRaisingEvents = true;
                     _watchers.Add(w);
                 }
-                catch { }
+                catch
+                {
+                }
             }
 
             UpdateStatus("Auto-refresh watching " + _watchers.Count + " folder(s).");
@@ -619,7 +538,9 @@ namespace AgvPathViewer
                     _watchers[i].EnableRaisingEvents = false;
                     _watchers[i].Dispose();
                 }
-                catch { }
+                catch
+                {
+                }
             }
             _watchers.Clear();
         }
@@ -634,9 +555,6 @@ namespace AgvPathViewer
             _debounceTimer.Start();
         }
 
-        // =========================
-        // Rendering
-        // =========================
         private void ComputeWorldBounds()
         {
             var pts = new List<PointF>();
@@ -741,7 +659,6 @@ namespace AgvPathViewer
             using (var pen = new Pen(s.Color, 2.2f))
             using (var headBrush = new SolidBrush(s.Color))
             {
-                // draw even if only 1 point
                 if (s.Points.Count == 1)
                 {
                     var only = WorldToScreen(s.Points[0].XY);
@@ -783,7 +700,6 @@ namespace AgvPathViewer
             }
         }
 
-        // World->Screen with zoom + pan
         private PointF WorldToScreen(PointF w)
         {
             return WorldToScreen(w, _zoom, _panPx);
@@ -812,11 +728,11 @@ namespace AgvPathViewer
             float oy = (H - drawH) / 2f;
 
             float x = ox + (w.X - rect.Left) * s + panPx.X;
-            float y = oy + (rect.Bottom - w.Y) * s + panPx.Y; // flip Y
+            float y = oy + (rect.Bottom - w.Y) * s + panPx.Y;
+
             return new PointF(x, y);
         }
 
-        // Screen->World for zoom-around-cursor
         private PointF ScreenToWorld(Point screenPt, float zoom, PointF panPx)
         {
             var rect = _worldBounds;
@@ -841,6 +757,7 @@ namespace AgvPathViewer
 
             float x = (screenPt.X - ox - panPx.X) / s + rect.Left;
             float y = rect.Bottom - ((screenPt.Y - oy - panPx.Y) / s);
+
             return new PointF(x, y);
         }
 
@@ -849,12 +766,9 @@ namespace AgvPathViewer
             _lblStatus.Text = msg;
         }
 
-        // =========================
-        // Models
-        // =========================
         private sealed class AgvPoint
         {
-            public DateTime Time;
+            public int Step;
             public string NodeId;
             public PointF XY;
         }
