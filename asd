@@ -383,10 +383,7 @@ namespace AgvPathViewer
             int iY = FindCol(header, "y", "posy", "coordy", "ycoord");
 
             if (iNode < 0 || iX < 0 || iY < 0)
-                throw new Exception(
-                    "Nodes CSV header not recognized.\n\n" +
-                    "Found columns: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]"
-                );
+                throw new Exception("Nodes CSV header not recognized. Found: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]");
 
             var dict = new Dictionary<string, PointF>(StringComparer.OrdinalIgnoreCase);
 
@@ -427,11 +424,7 @@ namespace AgvPathViewer
 
             int iNode = FindCol(header, "node", "nodeid", "node_id", "id", "csomopont", "allomas");
             if (iNode < 0)
-                throw new Exception(
-                    "Log CSV '" + Path.GetFileName(path) + "' header not recognized.\n\n" +
-                    "Found columns: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]\n" +
-                    "Need a node column (node/node_id/id/csomopont)."
-                );
+                throw new Exception("Log CSV '" + Path.GetFileName(path) + "' needs a node column. Found: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]");
 
             int totalRows = 0;
             int shortRow = 0;
@@ -472,10 +465,8 @@ namespace AgvPathViewer
             if (compressed.Count == 0)
             {
                 throw new Exception(
-                    "0 points parsed from '" + Path.GetFileName(path) + "'.\n\n" +
-                    "Rows read: " + totalRows + "\n" +
-                    "Skipped: shortRow=" + shortRow + ", emptyNode=" + emptyNode + ", unknownNode=" + unknownNode + "\n\n" +
-                    "This means node IDs in the log do not match nodes.csv, or the node column is wrong."
+                    "0 points parsed from '" + Path.GetFileName(path) + "'. Rows=" + totalRows +
+                    ", shortRow=" + shortRow + ", emptyNode=" + emptyNode + ", unknownNode=" + unknownNode
                 );
             }
 
@@ -656,27 +647,76 @@ namespace AgvPathViewer
         {
             if (s.Points == null || s.Points.Count == 0) return;
 
-            using (var pen = new Pen(s.Color, 2.2f))
+            if (s.Points.Count == 1)
+            {
+                var only = WorldToScreen(s.Points[0].XY);
+                using (var headBrush = new SolidBrush(s.Color))
+                {
+                    g.FillEllipse(headBrush, only.X - 6, only.Y - 6, 12, 12);
+                }
+                return;
+            }
+
+            var edgeCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 1; i < s.Points.Count; i++)
+            {
+                var key = EdgeKeyDirected(s.Points[i - 1].NodeId, s.Points[i].NodeId);
+                int c;
+                if (!edgeCounts.TryGetValue(key, out c)) c = 0;
+                edgeCounts[key] = c + 1;
+            }
+
+            for (int i = 1; i < s.Points.Count; i++)
+            {
+                var a = s.Points[i - 1];
+                var b = s.Points[i];
+
+                var key = EdgeKeyDirected(a.NodeId, b.NodeId);
+                int c = edgeCounts[key];
+
+                Color col;
+                if (c <= 1) col = BlendWithWhite(s.Color, 0.65f);
+                else if (c == 2) col = BlendWithWhite(s.Color, 0.35f);
+                else col = s.Color;
+
+                float width = (c <= 1) ? 2.0f : (c == 2 ? 2.8f : 3.6f);
+
+                using (var pen = new Pen(col, width))
+                {
+                    var p1 = WorldToScreen(a.XY);
+                    var p2 = WorldToScreen(b.XY);
+                    g.DrawLine(pen, p1, p2);
+                }
+            }
+
+            var last = WorldToScreen(s.Points[s.Points.Count - 1].XY);
             using (var headBrush = new SolidBrush(s.Color))
             {
-                if (s.Points.Count == 1)
-                {
-                    var only = WorldToScreen(s.Points[0].XY);
-                    g.FillEllipse(headBrush, only.X - 6, only.Y - 6, 12, 12);
-                    return;
-                }
-
-                PointF prev = WorldToScreen(s.Points[0].XY);
-                for (int i = 1; i < s.Points.Count; i++)
-                {
-                    var cur = WorldToScreen(s.Points[i].XY);
-                    g.DrawLine(pen, prev, cur);
-                    prev = cur;
-                }
-
-                var last = WorldToScreen(s.Points[s.Points.Count - 1].XY);
                 g.FillEllipse(headBrush, last.X - 6, last.Y - 6, 12, 12);
             }
+        }
+
+        private static string EdgeKeyDirected(string a, string b)
+        {
+            a = (a ?? "").Trim();
+            b = (b ?? "").Trim();
+            return a + "->" + b;
+        }
+
+        private static Color BlendWithWhite(Color baseColor, float t)
+        {
+            if (t < 0f) t = 0f;
+            if (t > 1f) t = 1f;
+
+            int r = (int)Math.Round(baseColor.R + (255 - baseColor.R) * t);
+            int g = (int)Math.Round(baseColor.G + (255 - baseColor.G) * t);
+            int b = (int)Math.Round(baseColor.B + (255 - baseColor.B) * t);
+
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
+
+            return Color.FromArgb(r, g, b);
         }
 
         private void DrawLegend(Graphics g)
