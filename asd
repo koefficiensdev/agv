@@ -53,6 +53,7 @@ namespace AgvPathViewer
 
         private readonly DoubleBufferedPictureBox _canvas;
         private readonly Timer _debounceTimer;
+        private readonly ToolTip _tip;
 
         private Dictionary<string, PointF> _nodes = new Dictionary<string, PointF>(StringComparer.OrdinalIgnoreCase);
         private readonly List<AgvSeries> _series = new List<AgvSeries>();
@@ -90,7 +91,7 @@ namespace AgvPathViewer
         public MainForm()
         {
             Text = "AGV Movement Path Viewer (Nodes + Logs)";
-            Width = 1600;
+            Width = 1550;
             Height = 900;
             StartPosition = FormStartPosition.CenterScreen;
             KeyPreview = true;
@@ -178,11 +179,11 @@ namespace AgvPathViewer
             _btnSaveLayout.Click += (s, e) => SaveLayout();
             _top.Controls.Add(_btnSaveLayout);
 
-            _btnLoadLayout = new Button { Text = "Load Layout", Left = 1570, Top = 12, Width = 95, Height = 30 };
+            _btnLoadLayout = new Button { Text = "Load Layout", Left = 1568, Top = 12, Width = 95, Height = 30 };
             _btnLoadLayout.Click += (s, e) => LoadLayout();
             _top.Controls.Add(_btnLoadLayout);
 
-            _btnClearLayout = new Button { Text = "Clear Layout", Left = 1670, Top = 12, Width = 95, Height = 30 };
+            _btnClearLayout = new Button { Text = "Clear Layout", Left = 1666, Top = 12, Width = 95, Height = 30 };
             _btnClearLayout.Click += (s, e) =>
             {
                 _layoutItems.Clear();
@@ -199,6 +200,7 @@ namespace AgvPathViewer
             _canvas.MouseDown += Canvas_MouseDown;
             _canvas.MouseMove += Canvas_MouseMove;
             _canvas.MouseUp += Canvas_MouseUp;
+            _canvas.MouseClick += Canvas_MouseClick;
             _canvas.MouseEnter += (s, e) => _canvas.Focus();
             Controls.Add(_canvas);
 
@@ -213,11 +215,143 @@ namespace AgvPathViewer
                 }
             };
 
+            _tip = new ToolTip();
+            _tip.ShowAlways = true;
+            _tip.AutoPopDelay = 4000;
+            _tip.InitialDelay = 0;
+            _tip.ReshowDelay = 0;
+
             this.KeyDown += MainForm_KeyDown;
             this.KeyUp += MainForm_KeyUp;
 
             UpdateBuilderButtons();
             RefreshApList();
+        }
+
+        private void Canvas_MouseClick(object sender, MouseEventArgs e)
+        {
+            if (e.Button != MouseButtons.Left) return;
+
+            string nodeId;
+            if (!TryHitNode(e.Location, out nodeId)) return;
+
+            var sb = new StringBuilder();
+            sb.Append("Node: ").Append(nodeId);
+
+            var wifiInfo = BuildWifiInfoForNode(nodeId);
+            if (!string.IsNullOrEmpty(wifiInfo))
+            {
+                sb.AppendLine();
+                sb.Append(wifiInfo);
+            }
+
+            _tip.Hide(_canvas);
+            _tip.Show(sb.ToString(), _canvas, e.X + 14, e.Y + 14, 4000);
+        }
+
+        private string BuildWifiInfoForNode(string nodeId)
+        {
+            var perAp = new Dictionary<string, SigAgg>(StringComparer.OrdinalIgnoreCase);
+
+            for (int si = 0; si < _series.Count; si++)
+            {
+                var w = _series[si].Wifi;
+                if (w == null || w.Count == 0) continue;
+
+                for (int i = 0; i < w.Count; i++)
+                {
+                    if (!string.Equals(w[i].NodeId, nodeId, StringComparison.OrdinalIgnoreCase)) continue;
+                    var mac = (w[i].Mac ?? "").Trim();
+                    if (mac.Length == 0) continue;
+
+                    SigAgg agg;
+                    if (!perAp.TryGetValue(mac, out agg)) agg = new SigAgg();
+                    agg.Sum += w[i].Signal;
+                    agg.Count += 1;
+                    perAp[mac] = agg;
+                }
+            }
+
+            if (perAp.Count == 0) return "";
+
+            string selected = (_cmbAp.SelectedItem as string) ?? "ALL";
+            bool all = string.Equals(selected, "ALL", StringComparison.OrdinalIgnoreCase);
+
+            if (!all)
+            {
+                SigAgg agg;
+                if (!perAp.TryGetValue(selected, out agg) || agg.Count <= 0) return "WiFi (" + selected + "): no samples";
+                int avg = (int)Math.Round((double)agg.Sum / agg.Count);
+                return "WiFi (" + selected + "): avg " + avg + " / 100  (" + agg.Count + " samples)";
+            }
+
+            int totalSum = 0, totalCount = 0;
+            foreach (var kv in perAp)
+            {
+                totalSum += kv.Value.Sum;
+                totalCount += kv.Value.Count;
+            }
+            int overallAvg = totalCount <= 0 ? 0 : (int)Math.Round((double)totalSum / totalCount);
+
+            var top = perAp
+                .Select(kv =>
+                {
+                    int avg = kv.Value.Count <= 0 ? 0 : (int)Math.Round((double)kv.Value.Sum / kv.Value.Count);
+                    return new ApAvg { Mac = kv.Key, Avg = avg, Count = kv.Value.Count };
+                })
+                .OrderByDescending(x => x.Avg)
+                .ThenByDescending(x => x.Count)
+                .Take(5)
+                .ToList();
+
+            var sb = new StringBuilder();
+            sb.Append("WiFi (ALL): overall avg ").Append(overallAvg).Append(" / 100  (").Append(totalCount).Append(" samples)");
+            sb.AppendLine();
+            sb.Append("Top APs:");
+            for (int i = 0; i < top.Count; i++)
+            {
+                sb.AppendLine();
+                sb.Append("  ").Append(top[i].Mac).Append("  avg ").Append(top[i].Avg).Append(" (").Append(top[i].Count).Append(")");
+            }
+            return sb.ToString();
+        }
+
+        private struct ApAvg
+        {
+            public string Mac;
+            public int Avg;
+            public int Count;
+        }
+
+        private bool TryHitNode(Point screenPt, out string nodeId)
+        {
+            nodeId = null;
+            if (_nodes.Count == 0) return false;
+
+            float bestD2 = float.MaxValue;
+            string bestId = null;
+
+            foreach (var kv in _nodes)
+            {
+                var p = WorldToScreen(kv.Value);
+                float dx = p.X - screenPt.X;
+                float dy = p.Y - screenPt.Y;
+                float d2 = dx * dx + dy * dy;
+                if (d2 < bestD2)
+                {
+                    bestD2 = d2;
+                    bestId = kv.Key;
+                }
+            }
+
+            float threshold = 12f;
+            if (bestId != null && bestD2 <= threshold * threshold)
+            {
+                nodeId = bestId;
+                return true;
+            }
+
+            return false;
         }
 
         private void MainForm_KeyDown(object sender, KeyEventArgs e)
@@ -921,8 +1055,8 @@ namespace AgvPathViewer
             if (iNode < 0)
                 throw new Exception("Log CSV '" + Path.GetFileName(path) + "' needs a node column. Found: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]");
 
-            int iSig = FindCol(header, "wifisig", "wifi_sig", "wifisignal", "wifi_signal", "wifi", "signal", "sig", "rssi");
-            int iMac = FindCol(header, "wifimac", "wifi_mac", "bssid", "ap", "apmac", "mac");
+            int iSig = FindCol(header, "wifi_sig", "wifisig", "wifi_signal", "wifisignal", "wifi", "signal", "sig", "rssi");
+            int iMac = FindCol(header, "wifi_mac", "wifimac", "bssid", "ap", "apmac", "mac");
 
             var list = new List<AgvPoint>();
             int step = 0;
@@ -944,9 +1078,8 @@ namespace AgvPathViewer
                 if (iSig >= 0 && iMac >= 0 && cols.Length > Math.Max(iSig, iMac))
                 {
                     var mac = (cols[iMac] ?? "").Trim().Trim('"').Trim();
-                    var sigStr = cols[iSig];
                     int sig;
-                    if (!string.IsNullOrEmpty(mac) && TryParseSignal0to100(sigStr, out sig))
+                    if (mac.Length > 0 && TryParseSignal0to100(cols[iSig], out sig))
                         wifiSamples.Add(new WifiSample { Mac = mac, Signal = sig, NodeId = nodeId, XY = xy });
                 }
             }
@@ -1128,9 +1261,7 @@ namespace AgvPathViewer
         {
             int n = 0;
             for (int i = 0; i < _series.Count; i++)
-            {
                 if (_series[i].Wifi != null) n += _series[i].Wifi.Count;
-            }
             return n;
         }
 
