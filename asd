@@ -40,6 +40,9 @@ namespace AgvPathViewer
         private readonly Button _btnResetView;
         private readonly CheckBox _chkShowNodeLabels;
 
+        private readonly CheckBox _chkWifiHeatmap;
+        private readonly ComboBox _cmbAp;
+
         private readonly CheckBox _chkBuilderMode;
         private readonly Button _btnToolSelect;
         private readonly Button _btnToolRect;
@@ -87,8 +90,8 @@ namespace AgvPathViewer
         public MainForm()
         {
             Text = "AGV Movement Path Viewer (Nodes + Logs)";
-            Width = 1400;
-            Height = 850;
+            Width = 1550;
+            Height = 900;
             StartPosition = FormStartPosition.CenterScreen;
             KeyPreview = true;
 
@@ -108,6 +111,7 @@ namespace AgvPathViewer
             {
                 _series.Clear();
                 StopWatchers();
+                RefreshApList();
                 ComputeWorldBounds();
                 Redraw();
             };
@@ -129,7 +133,19 @@ namespace AgvPathViewer
             _chkShowNodeLabels.CheckedChanged += (s, e) => Redraw();
             _top.Controls.Add(_chkShowNodeLabels);
 
-            _chkBuilderMode = new CheckBox { Text = "Builder mode", Left = 820, Top = 17, Width = 110 };
+            _chkWifiHeatmap = new CheckBox { Text = "WiFi heatmap", Left = 820, Top = 17, Width = 110, Checked = false };
+            _chkWifiHeatmap.CheckedChanged += (s, e) =>
+            {
+                _cmbAp.Enabled = _chkWifiHeatmap.Checked;
+                Redraw();
+            };
+            _top.Controls.Add(_chkWifiHeatmap);
+
+            _cmbAp = new ComboBox { Left = 935, Top = 14, Width = 210, DropDownStyle = ComboBoxStyle.DropDownList, Enabled = false };
+            _cmbAp.SelectedIndexChanged += (s, e) => Redraw();
+            _top.Controls.Add(_cmbAp);
+
+            _chkBuilderMode = new CheckBox { Text = "Builder mode", Left = 1155, Top = 17, Width = 110 };
             _chkBuilderMode.CheckedChanged += (s, e) =>
             {
                 if (!_chkBuilderMode.Checked)
@@ -146,35 +162,24 @@ namespace AgvPathViewer
             };
             _top.Controls.Add(_chkBuilderMode);
 
-            _btnToolSelect = new Button { Text = "Select", Left = 930, Top = 12, Width = 70, Height = 30 };
+            _btnToolSelect = new Button { Text = "Select", Left = 1265, Top = 12, Width = 70, Height = 30 };
             _btnToolSelect.Click += (s, e) => { _builderTool = BuilderTool.Select; UpdateBuilderButtons(); };
             _top.Controls.Add(_btnToolSelect);
 
-            _btnToolRect = new Button { Text = "Rect", Left = 1005, Top = 12, Width = 60, Height = 30 };
+            _btnToolRect = new Button { Text = "Rect", Left = 1340, Top = 12, Width = 60, Height = 30 };
             _btnToolRect.Click += (s, e) => { _builderTool = BuilderTool.Rect; UpdateBuilderButtons(); };
             _top.Controls.Add(_btnToolRect);
 
-            _btnToolText = new Button { Text = "Text", Left = 1070, Top = 12, Width = 60, Height = 30 };
+            _btnToolText = new Button { Text = "Text", Left = 1405, Top = 12, Width = 60, Height = 30 };
             _btnToolText.Click += (s, e) => { _builderTool = BuilderTool.Text; UpdateBuilderButtons(); };
             _top.Controls.Add(_btnToolText);
 
-            _btnSaveLayout = new Button { Text = "Save Layout", Left = 1135, Top = 12, Width = 95, Height = 30 };
+            _btnSaveLayout = new Button { Text = "Save Layout", Left = 1470, Top = 12, Width = 95, Height = 30 };
             _btnSaveLayout.Click += (s, e) => SaveLayout();
             _top.Controls.Add(_btnSaveLayout);
 
-            _btnLoadLayout = new Button { Text = "Load Layout", Left = 1235, Top = 12, Width = 95, Height = 30 };
-            _btnLoadLayout.Click += (s, e) => LoadLayout();
-            _top.Controls.Add(_btnLoadLayout);
-
-            _btnClearLayout = new Button { Text = "Clear Layout", Left = 1335, Top = 12, Width = 95, Height = 30 };
-            _btnClearLayout.Click += (s, e) =>
-            {
-                _layoutItems.Clear();
-                _selectedLayoutItem = null;
-                ComputeWorldBounds();
-                Redraw();
-            };
-            _top.Controls.Add(_btnClearLayout);
+            _btnLoadLayout = new Button { Text = "Load Layout", Left = 1570, Top = 12, Width = 95, Height = 30, Visible = false };
+            _btnClearLayout = new Button { Text = "Clear Layout", Left = 1670, Top = 12, Width = 95, Height = 30, Visible = false };
 
             _canvas = new DoubleBufferedPictureBox { Dock = DockStyle.Fill, BackColor = Color.White, TabStop = true };
             _canvas.Paint += Canvas_Paint;
@@ -201,6 +206,7 @@ namespace AgvPathViewer
             this.KeyUp += MainForm_KeyUp;
 
             UpdateBuilderButtons();
+            RefreshApList();
         }
 
         private void MainForm_KeyDown(object sender, KeyEventArgs e)
@@ -240,8 +246,6 @@ namespace AgvPathViewer
             _btnToolRect.Enabled = bm;
             _btnToolText.Enabled = bm;
             _btnSaveLayout.Enabled = bm;
-            _btnLoadLayout.Enabled = bm;
-            _btnClearLayout.Enabled = bm;
 
             _btnToolSelect.BackColor = (_builderTool == BuilderTool.Select && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
             _btnToolRect.BackColor = (_builderTool == BuilderTool.Rect && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
@@ -418,7 +422,7 @@ namespace AgvPathViewer
         {
             if (_chkBuilderMode.Checked)
             {
-                if (_panning && (_spaceDown && e.Button == MouseButtons.Left || e.Button == MouseButtons.Middle))
+                if (_panning && ((_spaceDown && e.Button == MouseButtons.Left) || e.Button == MouseButtons.Middle))
                 {
                     _panning = false;
                     _canvas.Cursor = Cursors.Default;
@@ -528,71 +532,7 @@ namespace AgvPathViewer
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show(this, "Failed to save layout:\n\n" + ex.Message, "Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            }
-        }
-
-        private void LoadLayout()
-        {
-            using (var ofd = new OpenFileDialog())
-            {
-                ofd.Title = "Load Layout";
-                ofd.Filter = "Layout (*.layout)|*.layout|All files (*.*)|*.*";
-                ofd.Multiselect = false;
-
-                if (ofd.ShowDialog(this) != DialogResult.OK) return;
-
-                try
-                {
-                    var items = new List<LayoutItem>();
-
-                    using (var sr = new StreamReader(ofd.FileName, Encoding.UTF8, true))
-                    {
-                        string header = sr.ReadLine();
-                        if (header == null || header.Trim() != "LAYOUT1")
-                            throw new Exception("Invalid layout file.");
-
-                        string line;
-                        while ((line = sr.ReadLine()) != null)
-                        {
-                            if (string.IsNullOrWhiteSpace(line)) continue;
-                            var parts = line.Split(new[] { '|' }, 6);
-                            if (parts.Length < 6) continue;
-
-                            string type = (parts[0] ?? "").Trim().ToLowerInvariant();
-
-                            float x = ParseFloatInvariant(parts[1]);
-                            float y = ParseFloatInvariant(parts[2]);
-                            float w = ParseFloatInvariant(parts[3]);
-                            float h = ParseFloatInvariant(parts[4]);
-                            string text = UnescapeText(parts[5]);
-
-                            if (type != "rect" && type != "text") continue;
-
-                            items.Add(new LayoutItem
-                            {
-                                Type = type,
-                                X = x,
-                                Y = y,
-                                W = w,
-                                H = h,
-                                Text = (type == "text") ? text : null
-                            });
-                        }
-                    }
-
-                    _layoutItems.Clear();
-                    _layoutItems.AddRange(items);
-                    _selectedLayoutItem = null;
-                    ComputeWorldBounds();
-                    Redraw();
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(this, "Failed to load layout:\n\n" + ex.Message, "Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(this, "Failed to save layout:\n\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
@@ -664,8 +604,7 @@ namespace AgvPathViewer
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show(this, "Failed to load nodes CSV:\n\n" + ex.Message, "Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(this, "Failed to load nodes CSV:\n\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
@@ -693,17 +632,20 @@ namespace AgvPathViewer
                         var agvName = Path.GetFileNameWithoutExtension(file);
                         _series.RemoveAll(x => StringComparer.OrdinalIgnoreCase.Equals(x.FilePath, file));
 
-                        var points = ParseAgvLogCsv_NoDate(file, _nodes);
+                        List<WifiSample> wifi;
+                        var points = ParseAgvLogCsv_NoDate(file, _nodes, out wifi);
 
                         _series.Add(new AgvSeries
                         {
                             Name = agvName,
                             FilePath = file,
-                            Points = points
+                            Points = points,
+                            Wifi = wifi
                         });
                     }
 
                     AssignColors();
+                    RefreshApList();
                     ComputeWorldBounds();
                     ResetView();
                     Redraw();
@@ -712,8 +654,7 @@ namespace AgvPathViewer
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show(this, "Failed to load AGV log CSV(s):\n\n" + ex.Message, "Error",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(this, "Failed to load AGV log CSV(s):\n\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
         }
@@ -727,13 +668,16 @@ namespace AgvPathViewer
                 try
                 {
                     if (!File.Exists(s.FilePath)) continue;
-                    s.Points = ParseAgvLogCsv_NoDate(s.FilePath, _nodes);
+                    List<WifiSample> wifi;
+                    s.Points = ParseAgvLogCsv_NoDate(s.FilePath, _nodes, out wifi);
+                    s.Wifi = wifi;
                 }
                 catch
                 {
                 }
             }
 
+            RefreshApList();
             ComputeWorldBounds();
             Redraw();
         }
@@ -845,8 +789,10 @@ namespace AgvPathViewer
             return dict;
         }
 
-        private static List<AgvPoint> ParseAgvLogCsv_NoDate(string path, Dictionary<string, PointF> nodes)
+        private static List<AgvPoint> ParseAgvLogCsv_NoDate(string path, Dictionary<string, PointF> nodes, out List<WifiSample> wifiSamples)
         {
+            wifiSamples = new List<WifiSample>();
+
             string[] lines;
             using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
             using (var sr = new StreamReader(fs, Encoding.UTF8, true))
@@ -865,6 +811,9 @@ namespace AgvPathViewer
             if (iNode < 0)
                 throw new Exception("Log CSV '" + Path.GetFileName(path) + "' needs a node column. Found: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]");
 
+            int iSig = FindCol(header, "wifisig", "wifi_sig", "wifisignal", "wifi_signal", "rssi", "signal");
+            int iMac = FindCol(header, "wifimac", "wifi_mac", "bssid", "ap", "apmac", "mac");
+
             var list = new List<AgvPoint>();
             int step = 0;
 
@@ -881,6 +830,19 @@ namespace AgvPathViewer
 
                 step++;
                 list.Add(new AgvPoint { Step = step, NodeId = nodeId, XY = xy });
+
+                if (iSig >= 0 && iMac >= 0 && cols.Length > Math.Max(iSig, iMac))
+                {
+                    var mac = (cols[iMac] ?? "").Trim().Trim('"').Trim();
+                    var sigStr = (cols[iSig] ?? "").Trim().Trim('"').Trim();
+                    int sig;
+                    if (!string.IsNullOrEmpty(mac) && int.TryParse(sigStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out sig))
+                    {
+                        if (sig < 0) sig = 0;
+                        if (sig > 100) sig = 100;
+                        wifiSamples.Add(new WifiSample { Mac = mac, Signal = sig, NodeId = nodeId, XY = xy });
+                    }
+                }
             }
 
             var compressed = new List<AgvPoint>(list.Count);
@@ -975,8 +937,7 @@ namespace AgvPathViewer
         {
             var pts = new List<PointF>();
             pts.AddRange(_nodes.Values);
-            foreach (var s in _series)
-                pts.AddRange(s.Points.Select(p => p.XY));
+            foreach (var s in _series) pts.AddRange(s.Points.Select(p => p.XY));
             foreach (var it in _layoutItems)
             {
                 if (it == null) continue;
@@ -1031,6 +992,32 @@ namespace AgvPathViewer
                 _series[i].Color = palette[i % palette.Length];
         }
 
+        private void RefreshApList()
+        {
+            var allMacs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var s in _series)
+            {
+                if (s.Wifi == null) continue;
+                foreach (var w in s.Wifi)
+                {
+                    if (!string.IsNullOrWhiteSpace(w.Mac))
+                        allMacs.Add(w.Mac.Trim());
+                }
+            }
+
+            var selected = _cmbAp.SelectedItem as string;
+
+            _cmbAp.Items.Clear();
+            _cmbAp.Items.Add("ALL");
+            foreach (var mac in allMacs.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+                _cmbAp.Items.Add(mac);
+
+            if (selected != null && _cmbAp.Items.Contains(selected))
+                _cmbAp.SelectedItem = selected;
+            else
+                _cmbAp.SelectedIndex = 0;
+        }
+
         private void Canvas_Paint(object sender, PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -1038,6 +1025,9 @@ namespace AgvPathViewer
             g.Clear(Color.White);
 
             DrawGrid(g);
+
+            if (_chkWifiHeatmap.Checked)
+                DrawWifiHeatmap(g);
 
             for (int i = 0; i < _series.Count; i++)
                 DrawSeriesPath(g, _series[i]);
@@ -1061,6 +1051,92 @@ namespace AgvPathViewer
 
                 for (int y = 0; y < _canvas.Height; y += step)
                     g.DrawLine(pen, 0, y, _canvas.Width, y);
+            }
+        }
+
+        private void DrawWifiHeatmap(Graphics g)
+        {
+            string selected = (_cmbAp.SelectedItem as string) ?? "ALL";
+            bool all = string.Equals(selected, "ALL", StringComparison.OrdinalIgnoreCase);
+
+            var dict = new Dictionary<string, Dictionary<string, SigAgg>>(StringComparer.OrdinalIgnoreCase);
+
+            for (int si = 0; si < _series.Count; si++)
+            {
+                var s = _series[si];
+                if (s.Wifi == null) continue;
+
+                for (int i = 0; i < s.Wifi.Count; i++)
+                {
+                    var w = s.Wifi[i];
+                    if (string.IsNullOrWhiteSpace(w.Mac)) continue;
+                    if (!all && !string.Equals(w.Mac, selected, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    Dictionary<string, SigAgg> perNode;
+                    if (!dict.TryGetValue(w.Mac, out perNode))
+                    {
+                        perNode = new Dictionary<string, SigAgg>(StringComparer.OrdinalIgnoreCase);
+                        dict[w.Mac] = perNode;
+                    }
+
+                    SigAgg agg;
+                    if (!perNode.TryGetValue(w.NodeId, out agg))
+                        agg = new SigAgg();
+
+                    agg.Sum += w.Signal;
+                    agg.Count += 1;
+                    perNode[w.NodeId] = agg;
+                }
+            }
+
+            int radius = 26;
+            foreach (var kvMac in dict)
+            {
+                foreach (var kvNode in kvMac.Value)
+                {
+                    PointF xy;
+                    if (!_nodes.TryGetValue(kvNode.Key, out xy)) continue;
+
+                    float avg = (kvNode.Value.Count <= 0) ? 0f : (float)kvNode.Value.Sum / kvNode.Value.Count;
+                    int sig = (int)Math.Round(avg);
+                    if (sig < 0) sig = 0;
+                    if (sig > 100) sig = 100;
+
+                    int alpha = 35 + (int)Math.Round(sig * 1.6);
+                    if (alpha < 35) alpha = 35;
+                    if (alpha > 200) alpha = 200;
+
+                    var col = SignalToColor(sig, alpha);
+                    var p = WorldToScreen(xy);
+
+                    using (var b = new SolidBrush(col))
+                    {
+                        g.FillEllipse(b, p.X - radius, p.Y - radius, radius * 2, radius * 2);
+                    }
+                }
+            }
+        }
+
+        private static Color SignalToColor(int sig, int alpha)
+        {
+            if (sig < 0) sig = 0;
+            if (sig > 100) sig = 100;
+
+            if (sig <= 50)
+            {
+                float t = sig / 50f;
+                int r = 255;
+                int g = (int)Math.Round(0 + 255 * t);
+                int b = 0;
+                return Color.FromArgb(alpha, r, g, b);
+            }
+            else
+            {
+                float t = (sig - 50) / 50f;
+                int r = (int)Math.Round(255 - 255 * t);
+                int g = 255;
+                int b = 0;
+                return Color.FromArgb(alpha, r, g, b);
             }
         }
 
@@ -1242,6 +1318,15 @@ namespace AgvPathViewer
                     g.DrawString(hint, font, Brushes.Black, 10, y + 8);
                 }
             }
+
+            if (_chkWifiHeatmap.Checked)
+            {
+                using (var font = new Font("Segoe UI", 9f))
+                {
+                    string sel = (_cmbAp.SelectedItem as string) ?? "ALL";
+                    g.DrawString("WiFi heatmap: " + sel, font, Brushes.Black, 10, y + 28);
+                }
+            }
         }
 
         private RectangleF WorldRectToScreen(float x, float y, float w, float h)
@@ -1328,11 +1413,26 @@ namespace AgvPathViewer
             public PointF XY;
         }
 
+        private sealed class WifiSample
+        {
+            public string Mac;
+            public int Signal;
+            public string NodeId;
+            public PointF XY;
+        }
+
+        private struct SigAgg
+        {
+            public int Sum;
+            public int Count;
+        }
+
         private sealed class AgvSeries
         {
             public string Name;
             public string FilePath;
             public List<AgvPoint> Points = new List<AgvPoint>();
+            public List<WifiSample> Wifi = new List<WifiSample>();
             public Color Color = Color.Blue;
         }
 
