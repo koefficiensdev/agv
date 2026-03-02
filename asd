@@ -82,6 +82,8 @@ namespace AgvPathViewer
         private PointF _dragStartWorld;
         private float _dragStartX, _dragStartY;
 
+        private bool _spaceDown = false;
+
         public MainForm()
         {
             Text = "AGV Movement Path Viewer (Nodes + Logs)";
@@ -106,6 +108,7 @@ namespace AgvPathViewer
             {
                 _series.Clear();
                 StopWatchers();
+                ComputeWorldBounds();
                 Redraw();
             };
             _top.Controls.Add(_btnClearLogs);
@@ -135,8 +138,10 @@ namespace AgvPathViewer
                     _draggingItem = false;
                     _selectedLayoutItem = null;
                     _builderTool = BuilderTool.Select;
-                    UpdateBuilderButtons();
+                    _panning = false;
+                    _canvas.Cursor = Cursors.Default;
                 }
+                UpdateBuilderButtons();
                 Redraw();
             };
             _top.Controls.Add(_chkBuilderMode);
@@ -174,13 +179,11 @@ namespace AgvPathViewer
             _canvas = new DoubleBufferedPictureBox { Dock = DockStyle.Fill, BackColor = Color.White, TabStop = true };
             _canvas.Paint += Canvas_Paint;
             _canvas.Resize += (s, e) => Redraw();
-
             _canvas.MouseWheel += Canvas_MouseWheel;
             _canvas.MouseDown += Canvas_MouseDown;
             _canvas.MouseMove += Canvas_MouseMove;
             _canvas.MouseUp += Canvas_MouseUp;
             _canvas.MouseEnter += (s, e) => _canvas.Focus();
-
             Controls.Add(_canvas);
 
             _debounceTimer = new Timer { Interval = 350 };
@@ -195,25 +198,33 @@ namespace AgvPathViewer
             };
 
             this.KeyDown += MainForm_KeyDown;
+            this.KeyUp += MainForm_KeyUp;
+
             UpdateBuilderButtons();
         }
 
         private void MainForm_KeyDown(object sender, KeyEventArgs e)
         {
-            if (!_chkBuilderMode.Checked) return;
+            if (e.KeyCode == Keys.Space) _spaceDown = true;
 
-            if (e.KeyCode == Keys.Delete && _selectedLayoutItem != null)
+            if (_chkBuilderMode.Checked)
             {
-                _layoutItems.Remove(_selectedLayoutItem);
-                _selectedLayoutItem = null;
-                ComputeWorldBounds();
-                Redraw();
-            }
+                if (e.KeyCode == Keys.Delete && _selectedLayoutItem != null)
+                {
+                    _layoutItems.Remove(_selectedLayoutItem);
+                    _selectedLayoutItem = null;
+                    ComputeWorldBounds();
+                    Redraw();
+                }
 
-            if (e.Control && e.KeyCode == Keys.S)
-            {
-                SaveLayout();
+                if (e.Control && e.KeyCode == Keys.S)
+                    SaveLayout();
             }
+        }
+
+        private void MainForm_KeyUp(object sender, KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Space) _spaceDown = false;
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
@@ -267,8 +278,26 @@ namespace AgvPathViewer
         {
             _canvas.Focus();
 
+            if (_chkBuilderMode.Checked && _spaceDown && e.Button == MouseButtons.Left)
+            {
+                _panning = true;
+                _panStartMouse = e.Location;
+                _panStartPanPx = _panPx;
+                _canvas.Cursor = Cursors.Hand;
+                return;
+            }
+
             if (_chkBuilderMode.Checked)
             {
+                if (e.Button == MouseButtons.Middle)
+                {
+                    _panning = true;
+                    _panStartMouse = e.Location;
+                    _panStartPanPx = _panPx;
+                    _canvas.Cursor = Cursors.Hand;
+                    return;
+                }
+
                 if (e.Button == MouseButtons.Left)
                 {
                     var w = ScreenToWorld(e.Location, _zoom, _panPx);
@@ -329,15 +358,6 @@ namespace AgvPathViewer
                     return;
                 }
 
-                if (e.Button == MouseButtons.Middle)
-                {
-                    _panning = true;
-                    _panStartMouse = e.Location;
-                    _panStartPanPx = _panPx;
-                    _canvas.Cursor = Cursors.Hand;
-                    return;
-                }
-
                 return;
             }
 
@@ -354,6 +374,15 @@ namespace AgvPathViewer
         {
             if (_chkBuilderMode.Checked)
             {
+                if (_panning)
+                {
+                    int dx = e.X - _panStartMouse.X;
+                    int dy = e.Y - _panStartMouse.Y;
+                    _panPx = new PointF(_panStartPanPx.X + dx, _panStartPanPx.Y + dy);
+                    Redraw();
+                    return;
+                }
+
                 if (_creatingRect)
                 {
                     _rectCurrentWorld = ScreenToWorld(e.Location, _zoom, _panPx);
@@ -389,6 +418,13 @@ namespace AgvPathViewer
         {
             if (_chkBuilderMode.Checked)
             {
+                if (_panning && (_spaceDown && e.Button == MouseButtons.Left || e.Button == MouseButtons.Middle))
+                {
+                    _panning = false;
+                    _canvas.Cursor = Cursors.Default;
+                    return;
+                }
+
                 if (e.Button == MouseButtons.Left)
                 {
                     if (_creatingRect)
@@ -427,16 +463,6 @@ namespace AgvPathViewer
                     {
                         _draggingItem = false;
                         Redraw();
-                        return;
-                    }
-                }
-
-                if (e.Button == MouseButtons.Middle)
-                {
-                    if (_panning)
-                    {
-                        _panning = false;
-                        _canvas.Cursor = Cursors.Default;
                         return;
                     }
                 }
@@ -1005,11 +1031,6 @@ namespace AgvPathViewer
                 _series[i].Color = palette[i % palette.Length];
         }
 
-        private void Redraw()
-        {
-            _canvas.Invalidate();
-        }
-
         private void Canvas_Paint(object sender, PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -1217,7 +1238,7 @@ namespace AgvPathViewer
                 using (var font = new Font("Segoe UI", 9f))
                 {
                     string tool = _builderTool.ToString();
-                    string hint = "Builder: " + tool + " | Left: use tool | Middle: pan | Delete: remove selected | Ctrl+S: save";
+                    string hint = "Builder: " + tool + " | Space+Left: pan | Middle: pan | Delete: remove | Ctrl+S: save";
                     g.DrawString(hint, font, Brushes.Black, 10, y + 8);
                 }
             }
@@ -1293,6 +1314,11 @@ namespace AgvPathViewer
             float y = rect.Bottom - ((screenPt.Y - oy - panPx.Y) / s);
 
             return new PointF(x, y);
+        }
+
+        private void Redraw()
+        {
+            _canvas.Invalidate();
         }
 
         private sealed class AgvPoint
