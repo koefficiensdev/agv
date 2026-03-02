@@ -4,6 +4,8 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.Serialization;
+using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Windows.Forms;
 using System.Drawing.Drawing2D;
@@ -30,6 +32,23 @@ namespace AgvPathViewer
         }
     }
 
+    [DataContract]
+    public sealed class LayoutFile
+    {
+        [DataMember] public List<LayoutItem> Items { get; set; } = new List<LayoutItem>();
+    }
+
+    [DataContract]
+    public sealed class LayoutItem
+    {
+        [DataMember] public string Type { get; set; }
+        [DataMember] public float X { get; set; }
+        [DataMember] public float Y { get; set; }
+        [DataMember] public float W { get; set; }
+        [DataMember] public float H { get; set; }
+        [DataMember] public string Text { get; set; }
+    }
+
     public sealed class MainForm : Form
     {
         private readonly Panel _top;
@@ -38,6 +57,16 @@ namespace AgvPathViewer
         private readonly Button _btnClearLogs;
         private readonly CheckBox _chkAutoRefresh;
         private readonly Button _btnResetView;
+        private readonly CheckBox _chkShowNodeLabels;
+
+        private readonly CheckBox _chkBuilderMode;
+        private readonly Button _btnToolSelect;
+        private readonly Button _btnToolRect;
+        private readonly Button _btnToolText;
+        private readonly Button _btnSaveLayout;
+        private readonly Button _btnLoadLayout;
+        private readonly Button _btnClearLayout;
+
         private readonly Label _lblStatus;
 
         private readonly DoubleBufferedPictureBox _canvas;
@@ -60,12 +89,27 @@ namespace AgvPathViewer
         private Point _panStartMouse;
         private PointF _panStartPanPx;
 
+        private readonly LayoutFile _layout = new LayoutFile();
+        private LayoutItem _selectedLayoutItem = null;
+
+        private enum BuilderTool { Select, Rect, Text }
+        private BuilderTool _builderTool = BuilderTool.Select;
+
+        private bool _creatingRect = false;
+        private PointF _rectStartWorld;
+        private PointF _rectCurrentWorld;
+
+        private bool _draggingItem = false;
+        private PointF _dragStartWorld;
+        private float _dragStartX, _dragStartY;
+
         public MainForm()
         {
             Text = "AGV Movement Path Viewer (Nodes + Logs)";
-            Width = 1200;
-            Height = 800;
+            Width = 1400;
+            Height = 850;
             StartPosition = FormStartPosition.CenterScreen;
+            KeyPreview = true;
 
             _top = new Panel { Dock = DockStyle.Top, Height = 56 };
             Controls.Add(_top);
@@ -88,7 +132,7 @@ namespace AgvPathViewer
             };
             _top.Controls.Add(_btnClearLogs);
 
-            _chkAutoRefresh = new CheckBox { Text = "Auto-refresh on file change", Left = 460, Top = 17, Width = 220 };
+            _chkAutoRefresh = new CheckBox { Text = "Auto-refresh", Left = 450, Top = 17, Width = 110 };
             _chkAutoRefresh.CheckedChanged += (s, e) =>
             {
                 if (_chkAutoRefresh.Checked) StartWatchers();
@@ -96,11 +140,59 @@ namespace AgvPathViewer
             };
             _top.Controls.Add(_chkAutoRefresh);
 
-            _btnResetView = new Button { Text = "Reset View", Left = 690, Top = 12, Width = 100, Height = 30 };
+            _btnResetView = new Button { Text = "Reset View", Left = 565, Top = 12, Width = 95, Height = 30 };
             _btnResetView.Click += (s, e) => ResetView();
             _top.Controls.Add(_btnResetView);
 
-            _lblStatus = new Label { Text = "Load nodes + logs to start.", Left = 800, Top = 18, AutoSize = true };
+            _chkShowNodeLabels = new CheckBox { Text = "Show node labels", Left = 670, Top = 17, Width = 140, Checked = true };
+            _chkShowNodeLabels.CheckedChanged += (s, e) => Redraw();
+            _top.Controls.Add(_chkShowNodeLabels);
+
+            _chkBuilderMode = new CheckBox { Text = "Builder mode", Left = 820, Top = 17, Width = 110 };
+            _chkBuilderMode.CheckedChanged += (s, e) =>
+            {
+                if (!_chkBuilderMode.Checked)
+                {
+                    _creatingRect = false;
+                    _draggingItem = false;
+                    _selectedLayoutItem = null;
+                    _builderTool = BuilderTool.Select;
+                    UpdateBuilderButtons();
+                }
+                Redraw();
+            };
+            _top.Controls.Add(_chkBuilderMode);
+
+            _btnToolSelect = new Button { Text = "Select", Left = 930, Top = 12, Width = 70, Height = 30 };
+            _btnToolSelect.Click += (s, e) => { _builderTool = BuilderTool.Select; UpdateBuilderButtons(); };
+            _top.Controls.Add(_btnToolSelect);
+
+            _btnToolRect = new Button { Text = "Rect", Left = 1005, Top = 12, Width = 60, Height = 30 };
+            _btnToolRect.Click += (s, e) => { _builderTool = BuilderTool.Rect; UpdateBuilderButtons(); };
+            _top.Controls.Add(_btnToolRect);
+
+            _btnToolText = new Button { Text = "Text", Left = 1070, Top = 12, Width = 60, Height = 30 };
+            _btnToolText.Click += (s, e) => { _builderTool = BuilderTool.Text; UpdateBuilderButtons(); };
+            _top.Controls.Add(_btnToolText);
+
+            _btnSaveLayout = new Button { Text = "Save Layout", Left = 1135, Top = 12, Width = 95, Height = 30 };
+            _btnSaveLayout.Click += (s, e) => SaveLayout();
+            _top.Controls.Add(_btnSaveLayout);
+
+            _btnLoadLayout = new Button { Text = "Load Layout", Left = 1235, Top = 12, Width = 95, Height = 30 };
+            _btnLoadLayout.Click += (s, e) => LoadLayout();
+            _top.Controls.Add(_btnLoadLayout);
+
+            _btnClearLayout = new Button { Text = "Clear Layout", Left = 1335, Top = 12, Width = 95, Height = 30 };
+            _btnClearLayout.Click += (s, e) =>
+            {
+                _layout.Items.Clear();
+                _selectedLayoutItem = null;
+                Redraw();
+            };
+            _top.Controls.Add(_btnClearLayout);
+
+            _lblStatus = new Label { Text = "Load nodes + logs to start.", Left = 10, Top = 60, AutoSize = true, Visible = false };
             _top.Controls.Add(_lblStatus);
 
             _canvas = new DoubleBufferedPictureBox { Dock = DockStyle.Fill, BackColor = Color.White, TabStop = true };
@@ -125,12 +217,47 @@ namespace AgvPathViewer
                     ReloadAllLogs();
                 }
             };
+
+            this.KeyDown += MainForm_KeyDown;
+            UpdateBuilderButtons();
+        }
+
+        private void MainForm_KeyDown(object sender, KeyEventArgs e)
+        {
+            if (!_chkBuilderMode.Checked) return;
+
+            if (e.KeyCode == Keys.Delete && _selectedLayoutItem != null)
+            {
+                _layout.Items.Remove(_selectedLayoutItem);
+                _selectedLayoutItem = null;
+                Redraw();
+            }
+
+            if (e.Control && e.KeyCode == Keys.S)
+            {
+                SaveLayout();
+            }
         }
 
         protected override void OnFormClosed(FormClosedEventArgs e)
         {
             StopWatchers();
             base.OnFormClosed(e);
+        }
+
+        private void UpdateBuilderButtons()
+        {
+            bool bm = _chkBuilderMode.Checked;
+            _btnToolSelect.Enabled = bm;
+            _btnToolRect.Enabled = bm;
+            _btnToolText.Enabled = bm;
+            _btnSaveLayout.Enabled = bm;
+            _btnLoadLayout.Enabled = bm;
+            _btnClearLayout.Enabled = bm;
+
+            _btnToolSelect.BackColor = (_builderTool == BuilderTool.Select && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
+            _btnToolRect.BackColor = (_builderTool == BuilderTool.Rect && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
+            _btnToolText.BackColor = (_builderTool == BuilderTool.Text && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
         }
 
         private void ResetView()
@@ -161,6 +288,82 @@ namespace AgvPathViewer
 
         private void Canvas_MouseDown(object sender, MouseEventArgs e)
         {
+            _canvas.Focus();
+
+            if (_chkBuilderMode.Checked)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    var w = ScreenToWorld(e.Location, _zoom, _panPx);
+
+                    if (_builderTool == BuilderTool.Rect)
+                    {
+                        _creatingRect = true;
+                        _rectStartWorld = w;
+                        _rectCurrentWorld = w;
+                        Redraw();
+                        return;
+                    }
+
+                    if (_builderTool == BuilderTool.Text)
+                    {
+                        string txt = InputBox.Show(this, "Text", "Enter text:");
+                        if (!string.IsNullOrEmpty(txt))
+                        {
+                            var item = new LayoutItem
+                            {
+                                Type = "text",
+                                X = w.X,
+                                Y = w.Y,
+                                W = 0,
+                                H = 0,
+                                Text = txt
+                            };
+                            _layout.Items.Add(item);
+                            _selectedLayoutItem = item;
+                            Redraw();
+                        }
+                        return;
+                    }
+
+                    if (_builderTool == BuilderTool.Select)
+                    {
+                        var hit = HitTestLayoutItem(e.Location);
+                        _selectedLayoutItem = hit;
+
+                        if (_selectedLayoutItem != null)
+                        {
+                            _draggingItem = true;
+                            _dragStartWorld = w;
+                            _dragStartX = _selectedLayoutItem.X;
+                            _dragStartY = _selectedLayoutItem.Y;
+                        }
+
+                        Redraw();
+                        return;
+                    }
+                }
+
+                if (e.Button == MouseButtons.Right)
+                {
+                    var hit = HitTestLayoutItem(e.Location);
+                    _selectedLayoutItem = hit;
+                    Redraw();
+                    return;
+                }
+
+                if (e.Button == MouseButtons.Middle)
+                {
+                    _panning = true;
+                    _panStartMouse = e.Location;
+                    _panStartPanPx = _panPx;
+                    _canvas.Cursor = Cursors.Hand;
+                    return;
+                }
+
+                return;
+            }
+
             if (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right)
             {
                 _panning = true;
@@ -172,21 +375,182 @@ namespace AgvPathViewer
 
         private void Canvas_MouseMove(object sender, MouseEventArgs e)
         {
+            if (_chkBuilderMode.Checked)
+            {
+                if (_creatingRect)
+                {
+                    _rectCurrentWorld = ScreenToWorld(e.Location, _zoom, _panPx);
+                    Redraw();
+                    return;
+                }
+
+                if (_draggingItem && _selectedLayoutItem != null)
+                {
+                    var w = ScreenToWorld(e.Location, _zoom, _panPx);
+                    float dx = w.X - _dragStartWorld.X;
+                    float dy = w.Y - _dragStartWorld.Y;
+                    _selectedLayoutItem.X = _dragStartX + dx;
+                    _selectedLayoutItem.Y = _dragStartY + dy;
+                    Redraw();
+                    return;
+                }
+
+                return;
+            }
+
             if (!_panning) return;
 
-            int dx = e.X - _panStartMouse.X;
-            int dy = e.Y - _panStartMouse.Y;
+            int dx2 = e.X - _panStartMouse.X;
+            int dy2 = e.Y - _panStartMouse.Y;
 
-            _panPx = new PointF(_panStartPanPx.X + dx, _panStartPanPx.Y + dy);
+            _panPx = new PointF(_panStartPanPx.X + dx2, _panStartPanPx.Y + dy2);
             Redraw();
         }
 
         private void Canvas_MouseUp(object sender, MouseEventArgs e)
         {
+            if (_chkBuilderMode.Checked)
+            {
+                if (e.Button == MouseButtons.Left)
+                {
+                    if (_creatingRect)
+                    {
+                        _creatingRect = false;
+
+                        var a = _rectStartWorld;
+                        var b = _rectCurrentWorld;
+
+                        float x = Math.Min(a.X, b.X);
+                        float y = Math.Min(a.Y, b.Y);
+                        float w = Math.Abs(a.X - b.X);
+                        float h = Math.Abs(a.Y - b.Y);
+
+                        if (w > 0.0001f && h > 0.0001f)
+                        {
+                            var item = new LayoutItem
+                            {
+                                Type = "rect",
+                                X = x,
+                                Y = y,
+                                W = w,
+                                H = h,
+                                Text = null
+                            };
+                            _layout.Items.Add(item);
+                            _selectedLayoutItem = item;
+                        }
+
+                        Redraw();
+                        return;
+                    }
+
+                    if (_draggingItem)
+                    {
+                        _draggingItem = false;
+                        Redraw();
+                        return;
+                    }
+                }
+
+                if (e.Button == MouseButtons.Middle)
+                {
+                    if (_panning)
+                    {
+                        _panning = false;
+                        _canvas.Cursor = Cursors.Default;
+                        return;
+                    }
+                }
+
+                return;
+            }
+
             if (_panning && (e.Button == MouseButtons.Middle || e.Button == MouseButtons.Right))
             {
                 _panning = false;
                 _canvas.Cursor = Cursors.Default;
+            }
+        }
+
+        private LayoutItem HitTestLayoutItem(Point screenPt)
+        {
+            for (int i = _layout.Items.Count - 1; i >= 0; i--)
+            {
+                var it = _layout.Items[i];
+                if (it == null) continue;
+
+                if (string.Equals(it.Type, "rect", StringComparison.OrdinalIgnoreCase))
+                {
+                    var r = WorldRectToScreen(it.X, it.Y, it.W, it.H);
+                    if (r.Contains(screenPt)) return it;
+                }
+                else if (string.Equals(it.Type, "text", StringComparison.OrdinalIgnoreCase))
+                {
+                    var p = WorldToScreen(new PointF(it.X, it.Y));
+                    var box = new RectangleF(p.X - 6, p.Y - 6, 12, 12);
+                    if (box.Contains(screenPt)) return it;
+                }
+            }
+
+            return null;
+        }
+
+        private void SaveLayout()
+        {
+            using (var sfd = new SaveFileDialog())
+            {
+                sfd.Title = "Save Layout";
+                sfd.Filter = "Layout JSON (*.json)|*.json|All files (*.*)|*.*";
+                sfd.FileName = "layout.json";
+                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+                try
+                {
+                    using (var fs = new FileStream(sfd.FileName, FileMode.Create, FileAccess.Write))
+                    {
+                        var ser = new DataContractJsonSerializer(typeof(LayoutFile));
+                        ser.WriteObject(fs, _layout);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Failed to save layout:\n\n" + ex.Message, "Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void LoadLayout()
+        {
+            using (var ofd = new OpenFileDialog())
+            {
+                ofd.Title = "Load Layout";
+                ofd.Filter = "Layout JSON (*.json)|*.json|All files (*.*)|*.*";
+                ofd.Multiselect = false;
+
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+
+                try
+                {
+                    LayoutFile loaded;
+                    using (var fs = new FileStream(ofd.FileName, FileMode.Open, FileAccess.Read))
+                    {
+                        var ser = new DataContractJsonSerializer(typeof(LayoutFile));
+                        loaded = (LayoutFile)ser.ReadObject(fs);
+                    }
+
+                    _layout.Items.Clear();
+                    if (loaded != null && loaded.Items != null)
+                        _layout.Items.AddRange(loaded.Items);
+
+                    _selectedLayoutItem = null;
+                    Redraw();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Failed to load layout:\n\n" + ex.Message, "Error",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
             }
         }
 
@@ -212,7 +576,6 @@ namespace AgvPathViewer
                     _nodes = ParseNodesCsv(ofd.FileName);
                     ComputeWorldBounds();
                     ResetView();
-                    UpdateStatus("Nodes loaded: " + _nodes.Count + " from " + Path.GetFileName(ofd.FileName));
                     Redraw();
                 }
                 catch (Exception ex)
@@ -259,8 +622,6 @@ namespace AgvPathViewer
                     AssignColors();
                     ComputeWorldBounds();
                     ResetView();
-
-                    UpdateStatus("Logs loaded: " + _series.Count + " file(s). Total points: " + _series.Sum(s => s.Points.Count));
                     Redraw();
 
                     if (_chkAutoRefresh.Checked) StartWatchers();
@@ -277,17 +638,12 @@ namespace AgvPathViewer
         {
             if (_nodes.Count == 0 || _series.Count == 0) return;
 
-            int reloaded = 0;
-            int totalPoints = 0;
-
             foreach (var s in _series)
             {
                 try
                 {
                     if (!File.Exists(s.FilePath)) continue;
                     s.Points = ParseAgvLogCsv_NoDate(s.FilePath, _nodes);
-                    reloaded++;
-                    totalPoints += s.Points.Count;
                 }
                 catch
                 {
@@ -295,7 +651,6 @@ namespace AgvPathViewer
             }
 
             ComputeWorldBounds();
-            UpdateStatus("Auto-refreshed " + reloaded + " file(s). Total points: " + totalPoints);
             Redraw();
         }
 
@@ -426,26 +781,19 @@ namespace AgvPathViewer
             if (iNode < 0)
                 throw new Exception("Log CSV '" + Path.GetFileName(path) + "' needs a node column. Found: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]");
 
-            int totalRows = 0;
-            int shortRow = 0;
-            int emptyNode = 0;
-            int unknownNode = 0;
-
             var list = new List<AgvPoint>();
             int step = 0;
 
             for (int r = 1; r < nonEmpty.Length; r++)
             {
                 var cols = SplitCsvLine(nonEmpty[r], delim);
-                totalRows++;
-
-                if (cols.Length <= iNode) { shortRow++; continue; }
+                if (cols.Length <= iNode) continue;
 
                 var nodeId = (cols[iNode] ?? "").Trim().Trim('"').Trim();
-                if (string.IsNullOrEmpty(nodeId)) { emptyNode++; continue; }
+                if (string.IsNullOrEmpty(nodeId)) continue;
 
                 PointF xy;
-                if (!nodes.TryGetValue(nodeId, out xy)) { unknownNode++; continue; }
+                if (!nodes.TryGetValue(nodeId, out xy)) continue;
 
                 step++;
                 list.Add(new AgvPoint { Step = step, NodeId = nodeId, XY = xy });
@@ -463,12 +811,7 @@ namespace AgvPathViewer
             }
 
             if (compressed.Count == 0)
-            {
-                throw new Exception(
-                    "0 points parsed from '" + Path.GetFileName(path) + "'. Rows=" + totalRows +
-                    ", shortRow=" + shortRow + ", emptyNode=" + emptyNode + ", unknownNode=" + unknownNode
-                );
-            }
+                throw new Exception("0 points parsed from '" + Path.GetFileName(path) + "'. Node IDs likely don't match nodes.csv.");
 
             return compressed;
         }
@@ -516,8 +859,6 @@ namespace AgvPathViewer
                 {
                 }
             }
-
-            UpdateStatus("Auto-refresh watching " + _watchers.Count + " folder(s).");
         }
 
         private void StopWatchers()
@@ -552,6 +893,19 @@ namespace AgvPathViewer
             pts.AddRange(_nodes.Values);
             foreach (var s in _series)
                 pts.AddRange(s.Points.Select(p => p.XY));
+            foreach (var it in _layout.Items)
+            {
+                if (it == null) continue;
+                if (string.Equals(it.Type, "rect", StringComparison.OrdinalIgnoreCase))
+                {
+                    pts.Add(new PointF(it.X, it.Y));
+                    pts.Add(new PointF(it.X + it.W, it.Y + it.H));
+                }
+                else if (string.Equals(it.Type, "text", StringComparison.OrdinalIgnoreCase))
+                {
+                    pts.Add(new PointF(it.X, it.Y));
+                }
+            }
 
             if (pts.Count == 0)
             {
@@ -609,7 +963,13 @@ namespace AgvPathViewer
             for (int i = 0; i < _series.Count; i++)
                 DrawSeriesPath(g, _series[i]);
 
+            DrawLayout(g);
+
             DrawNodes(g);
+
+            if (_chkBuilderMode.Checked && _creatingRect)
+                DrawPreviewRect(g);
+
             DrawLegend(g);
         }
 
@@ -638,9 +998,71 @@ namespace AgvPathViewer
                 {
                     var p = WorldToScreen(kv.Value);
                     g.FillEllipse(nodeBrush, p.X - NodeRadiusPx, p.Y - NodeRadiusPx, NodeRadiusPx * 2, NodeRadiusPx * 2);
-                    g.DrawString(kv.Key, font, labelBrush, p.X + 6, p.Y + 3);
+
+                    if (_chkShowNodeLabels.Checked)
+                        g.DrawString(kv.Key, font, labelBrush, p.X + 6, p.Y + 3);
                 }
             }
+        }
+
+        private void DrawLayout(Graphics g)
+        {
+            if (_layout.Items.Count == 0) return;
+
+            using (var font = new Font("Segoe UI", 10f))
+            {
+                foreach (var it in _layout.Items)
+                {
+                    if (it == null) continue;
+
+                    bool selected = ReferenceEquals(it, _selectedLayoutItem);
+
+                    if (string.Equals(it.Type, "rect", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var r = WorldRectToScreen(it.X, it.Y, it.W, it.H);
+
+                        using (var fill = new SolidBrush(Color.FromArgb(70, 80, 80, 80)))
+                            g.FillRectangle(fill, r);
+
+                        using (var pen = new Pen(selected ? Color.Red : Color.FromArgb(120, 60, 60, 60), selected ? 2.5f : 1.5f))
+                            g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
+                    }
+                    else if (string.Equals(it.Type, "text", StringComparison.OrdinalIgnoreCase))
+                    {
+                        var p = WorldToScreen(new PointF(it.X, it.Y));
+
+                        string txt = it.Text ?? "";
+                        var size = g.MeasureString(txt, font);
+
+                        var bg = new RectangleF(p.X, p.Y, size.Width + 10, size.Height + 6);
+                        using (var fill = new SolidBrush(Color.FromArgb(90, 255, 255, 255)))
+                            g.FillRectangle(fill, bg);
+
+                        using (var pen = new Pen(selected ? Color.Red : Color.FromArgb(140, 0, 0, 0), selected ? 2f : 1f))
+                            g.DrawRectangle(pen, bg.X, bg.Y, bg.Width, bg.Height);
+
+                        using (var brush = new SolidBrush(Color.Black))
+                            g.DrawString(txt, font, brush, p.X + 5, p.Y + 3);
+                    }
+                }
+            }
+        }
+
+        private void DrawPreviewRect(Graphics g)
+        {
+            var a = _rectStartWorld;
+            var b = _rectCurrentWorld;
+
+            float x = Math.Min(a.X, b.X);
+            float y = Math.Min(a.Y, b.Y);
+            float w = Math.Abs(a.X - b.X);
+            float h = Math.Abs(a.Y - b.Y);
+
+            if (w < 0.0001f || h < 0.0001f) return;
+
+            var r = WorldRectToScreen(x, y, w, h);
+            using (var pen = new Pen(Color.FromArgb(200, 0, 120, 215), 2f) { DashStyle = DashStyle.Dash })
+                g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
         }
 
         private void DrawSeriesPath(Graphics g, AgvSeries s)
@@ -651,9 +1073,7 @@ namespace AgvPathViewer
             {
                 var only = WorldToScreen(s.Points[0].XY);
                 using (var headBrush = new SolidBrush(s.Color))
-                {
                     g.FillEllipse(headBrush, only.X - 6, only.Y - 6, 12, 12);
-                }
                 return;
             }
 
@@ -691,9 +1111,7 @@ namespace AgvPathViewer
 
             var last = WorldToScreen(s.Points[s.Points.Count - 1].XY);
             using (var headBrush = new SolidBrush(s.Color))
-            {
                 g.FillEllipse(headBrush, last.X - 6, last.Y - 6, 12, 12);
-            }
         }
 
         private static string EdgeKeyDirected(string a, string b)
@@ -738,6 +1156,27 @@ namespace AgvPathViewer
                     y += 22;
                 }
             }
+
+            if (_chkBuilderMode.Checked)
+            {
+                using (var font = new Font("Segoe UI", 9f))
+                {
+                    string tool = _builderTool.ToString();
+                    string hint = "Builder: " + tool + " | Left: use tool | Middle: pan | Delete: remove selected | Ctrl+S: save";
+                    g.DrawString(hint, font, Brushes.Black, 10, y + 8);
+                }
+            }
+        }
+
+        private RectangleF WorldRectToScreen(float x, float y, float w, float h)
+        {
+            var p1 = WorldToScreen(new PointF(x, y));
+            var p2 = WorldToScreen(new PointF(x + w, y + h));
+            float left = Math.Min(p1.X, p2.X);
+            float top = Math.Min(p1.Y, p2.Y);
+            float right = Math.Max(p1.X, p2.X);
+            float bottom = Math.Max(p1.Y, p2.Y);
+            return new RectangleF(left, top, right - left, bottom - top);
         }
 
         private PointF WorldToScreen(PointF w)
@@ -819,6 +1258,60 @@ namespace AgvPathViewer
             public string FilePath;
             public List<AgvPoint> Points = new List<AgvPoint>();
             public Color Color = Color.Blue;
+        }
+
+        public static class InputBox
+        {
+            public static string Show(IWin32Window owner, string title, string prompt)
+            {
+                using (var f = new Form())
+                using (var lbl = new Label())
+                using (var tb = new TextBox())
+                using (var ok = new Button())
+                using (var cancel = new Button())
+                {
+                    f.Text = title;
+                    f.FormBorderStyle = FormBorderStyle.FixedDialog;
+                    f.StartPosition = FormStartPosition.CenterParent;
+                    f.MinimizeBox = false;
+                    f.MaximizeBox = false;
+                    f.ShowInTaskbar = false;
+                    f.ClientSize = new Size(420, 140);
+
+                    lbl.Text = prompt;
+                    lbl.Left = 10;
+                    lbl.Top = 12;
+                    lbl.Width = 400;
+
+                    tb.Left = 10;
+                    tb.Top = 40;
+                    tb.Width = 400;
+
+                    ok.Text = "OK";
+                    ok.Left = 250;
+                    ok.Top = 80;
+                    ok.Width = 75;
+                    ok.DialogResult = DialogResult.OK;
+
+                    cancel.Text = "Cancel";
+                    cancel.Left = 335;
+                    cancel.Top = 80;
+                    cancel.Width = 75;
+                    cancel.DialogResult = DialogResult.Cancel;
+
+                    f.Controls.Add(lbl);
+                    f.Controls.Add(tb);
+                    f.Controls.Add(ok);
+                    f.Controls.Add(cancel);
+
+                    f.AcceptButton = ok;
+                    f.CancelButton = cancel;
+
+                    var dr = f.ShowDialog(owner);
+                    if (dr == DialogResult.OK) return tb.Text;
+                    return null;
+                }
+            }
         }
     }
 }
