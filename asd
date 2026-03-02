@@ -4,8 +4,6 @@ using System.Drawing;
 using System.Globalization;
 using System.IO;
 using System.Linq;
-using System.Runtime.Serialization;
-using System.Runtime.Serialization.Json;
 using System.Text;
 using System.Windows.Forms;
 using System.Drawing.Drawing2D;
@@ -32,23 +30,6 @@ namespace AgvPathViewer
         }
     }
 
-    [DataContract]
-    public sealed class LayoutFile
-    {
-        [DataMember] public List<LayoutItem> Items { get; set; } = new List<LayoutItem>();
-    }
-
-    [DataContract]
-    public sealed class LayoutItem
-    {
-        [DataMember] public string Type { get; set; }
-        [DataMember] public float X { get; set; }
-        [DataMember] public float Y { get; set; }
-        [DataMember] public float W { get; set; }
-        [DataMember] public float H { get; set; }
-        [DataMember] public string Text { get; set; }
-    }
-
     public sealed class MainForm : Form
     {
         private readonly Panel _top;
@@ -66,8 +47,6 @@ namespace AgvPathViewer
         private readonly Button _btnSaveLayout;
         private readonly Button _btnLoadLayout;
         private readonly Button _btnClearLayout;
-
-        private readonly Label _lblStatus;
 
         private readonly DoubleBufferedPictureBox _canvas;
         private readonly Timer _debounceTimer;
@@ -89,7 +68,7 @@ namespace AgvPathViewer
         private Point _panStartMouse;
         private PointF _panStartPanPx;
 
-        private readonly LayoutFile _layout = new LayoutFile();
+        private readonly List<LayoutItem> _layoutItems = new List<LayoutItem>();
         private LayoutItem _selectedLayoutItem = null;
 
         private enum BuilderTool { Select, Rect, Text }
@@ -127,7 +106,6 @@ namespace AgvPathViewer
             {
                 _series.Clear();
                 StopWatchers();
-                UpdateStatus("Logs cleared.");
                 Redraw();
             };
             _top.Controls.Add(_btnClearLogs);
@@ -186,14 +164,12 @@ namespace AgvPathViewer
             _btnClearLayout = new Button { Text = "Clear Layout", Left = 1335, Top = 12, Width = 95, Height = 30 };
             _btnClearLayout.Click += (s, e) =>
             {
-                _layout.Items.Clear();
+                _layoutItems.Clear();
                 _selectedLayoutItem = null;
+                ComputeWorldBounds();
                 Redraw();
             };
             _top.Controls.Add(_btnClearLayout);
-
-            _lblStatus = new Label { Text = "Load nodes + logs to start.", Left = 10, Top = 60, AutoSize = true, Visible = false };
-            _top.Controls.Add(_lblStatus);
 
             _canvas = new DoubleBufferedPictureBox { Dock = DockStyle.Fill, BackColor = Color.White, TabStop = true };
             _canvas.Paint += Canvas_Paint;
@@ -228,8 +204,9 @@ namespace AgvPathViewer
 
             if (e.KeyCode == Keys.Delete && _selectedLayoutItem != null)
             {
-                _layout.Items.Remove(_selectedLayoutItem);
+                _layoutItems.Remove(_selectedLayoutItem);
                 _selectedLayoutItem = null;
+                ComputeWorldBounds();
                 Redraw();
             }
 
@@ -319,8 +296,9 @@ namespace AgvPathViewer
                                 H = 0,
                                 Text = txt
                             };
-                            _layout.Items.Add(item);
+                            _layoutItems.Add(item);
                             _selectedLayoutItem = item;
+                            ComputeWorldBounds();
                             Redraw();
                         }
                         return;
@@ -346,8 +324,7 @@ namespace AgvPathViewer
 
                 if (e.Button == MouseButtons.Right)
                 {
-                    var hit = HitTestLayoutItem(e.Location);
-                    _selectedLayoutItem = hit;
+                    _selectedLayoutItem = HitTestLayoutItem(e.Location);
                     Redraw();
                     return;
                 }
@@ -391,6 +368,7 @@ namespace AgvPathViewer
                     float dy = w.Y - _dragStartWorld.Y;
                     _selectedLayoutItem.X = _dragStartX + dx;
                     _selectedLayoutItem.Y = _dragStartY + dy;
+                    ComputeWorldBounds();
                     Redraw();
                     return;
                 }
@@ -436,8 +414,9 @@ namespace AgvPathViewer
                                 H = h,
                                 Text = null
                             };
-                            _layout.Items.Add(item);
+                            _layoutItems.Add(item);
                             _selectedLayoutItem = item;
+                            ComputeWorldBounds();
                         }
 
                         Redraw();
@@ -474,9 +453,9 @@ namespace AgvPathViewer
 
         private LayoutItem HitTestLayoutItem(Point screenPt)
         {
-            for (int i = _layout.Items.Count - 1; i >= 0; i--)
+            for (int i = _layoutItems.Count - 1; i >= 0; i--)
             {
-                var it = _layout.Items[i];
+                var it = _layoutItems[i];
                 if (it == null) continue;
 
                 if (string.Equals(it.Type, "rect", StringComparison.OrdinalIgnoreCase))
@@ -500,16 +479,25 @@ namespace AgvPathViewer
             using (var sfd = new SaveFileDialog())
             {
                 sfd.Title = "Save Layout";
-                sfd.Filter = "Layout JSON (*.json)|*.json|All files (*.*)|*.*";
-                sfd.FileName = "layout.json";
+                sfd.Filter = "Layout (*.layout)|*.layout|All files (*.*)|*.*";
+                sfd.FileName = "layout.layout";
                 if (sfd.ShowDialog(this) != DialogResult.OK) return;
 
                 try
                 {
-                    using (var fs = new FileStream(sfd.FileName, FileMode.Create, FileAccess.Write))
+                    using (var sw = new StreamWriter(sfd.FileName, false, Encoding.UTF8))
                     {
-                        var ser = new DataContractJsonSerializer(typeof(LayoutFile));
-                        ser.WriteObject(fs, _layout);
+                        sw.WriteLine("LAYOUT1");
+                        foreach (var it in _layoutItems)
+                        {
+                            string type = (it.Type ?? "").Trim().ToLowerInvariant();
+                            string x = it.X.ToString("R", CultureInfo.InvariantCulture);
+                            string y = it.Y.ToString("R", CultureInfo.InvariantCulture);
+                            string w = it.W.ToString("R", CultureInfo.InvariantCulture);
+                            string h = it.H.ToString("R", CultureInfo.InvariantCulture);
+                            string text = EscapeText(it.Text ?? "");
+                            sw.WriteLine(type + "|" + x + "|" + y + "|" + w + "|" + h + "|" + text);
+                        }
                     }
                 }
                 catch (Exception ex)
@@ -525,25 +513,54 @@ namespace AgvPathViewer
             using (var ofd = new OpenFileDialog())
             {
                 ofd.Title = "Load Layout";
-                ofd.Filter = "Layout JSON (*.json)|*.json|All files (*.*)|*.*";
+                ofd.Filter = "Layout (*.layout)|*.layout|All files (*.*)|*.*";
                 ofd.Multiselect = false;
 
                 if (ofd.ShowDialog(this) != DialogResult.OK) return;
 
                 try
                 {
-                    LayoutFile loaded;
-                    using (var fs = new FileStream(ofd.FileName, FileMode.Open, FileAccess.Read))
+                    var items = new List<LayoutItem>();
+
+                    using (var sr = new StreamReader(ofd.FileName, Encoding.UTF8, true))
                     {
-                        var ser = new DataContractJsonSerializer(typeof(LayoutFile));
-                        loaded = (LayoutFile)ser.ReadObject(fs);
+                        string header = sr.ReadLine();
+                        if (header == null || header.Trim() != "LAYOUT1")
+                            throw new Exception("Invalid layout file.");
+
+                        string line;
+                        while ((line = sr.ReadLine()) != null)
+                        {
+                            if (string.IsNullOrWhiteSpace(line)) continue;
+                            var parts = line.Split(new[] { '|' }, 6);
+                            if (parts.Length < 6) continue;
+
+                            string type = (parts[0] ?? "").Trim().ToLowerInvariant();
+
+                            float x = ParseFloatInvariant(parts[1]);
+                            float y = ParseFloatInvariant(parts[2]);
+                            float w = ParseFloatInvariant(parts[3]);
+                            float h = ParseFloatInvariant(parts[4]);
+                            string text = UnescapeText(parts[5]);
+
+                            if (type != "rect" && type != "text") continue;
+
+                            items.Add(new LayoutItem
+                            {
+                                Type = type,
+                                X = x,
+                                Y = y,
+                                W = w,
+                                H = h,
+                                Text = (type == "text") ? text : null
+                            });
+                        }
                     }
 
-                    _layout.Items.Clear();
-                    if (loaded != null && loaded.Items != null)
-                        _layout.Items.AddRange(loaded.Items);
-
+                    _layoutItems.Clear();
+                    _layoutItems.AddRange(items);
                     _selectedLayoutItem = null;
+                    ComputeWorldBounds();
                     Redraw();
                 }
                 catch (Exception ex)
@@ -552,6 +569,47 @@ namespace AgvPathViewer
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                 }
             }
+        }
+
+        private static string EscapeText(string s)
+        {
+            if (s == null) return "";
+            return s.Replace("\\", "\\\\")
+                    .Replace("\r", "\\r")
+                    .Replace("\n", "\\n")
+                    .Replace("\t", "\\t")
+                    .Replace("|", "\\p");
+        }
+
+        private static string UnescapeText(string s)
+        {
+            if (s == null) return "";
+            var sb = new StringBuilder();
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\\' && i + 1 < s.Length)
+                {
+                    char n = s[i + 1];
+                    if (n == '\\') { sb.Append('\\'); i++; continue; }
+                    if (n == 'r') { sb.Append('\r'); i++; continue; }
+                    if (n == 'n') { sb.Append('\n'); i++; continue; }
+                    if (n == 't') { sb.Append('\t'); i++; continue; }
+                    if (n == 'p') { sb.Append('|'); i++; continue; }
+                }
+                sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        private static float ParseFloatInvariant(string s)
+        {
+            s = (s ?? "").Trim();
+            float v;
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v)) return v;
+            s = s.Replace(',', '.');
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v)) return v;
+            return 0f;
         }
 
         private static float Clamp(float v, float min, float max)
@@ -893,7 +951,7 @@ namespace AgvPathViewer
             pts.AddRange(_nodes.Values);
             foreach (var s in _series)
                 pts.AddRange(s.Points.Select(p => p.XY));
-            foreach (var it in _layout.Items)
+            foreach (var it in _layoutItems)
             {
                 if (it == null) continue;
                 if (string.Equals(it.Type, "rect", StringComparison.OrdinalIgnoreCase))
@@ -964,7 +1022,6 @@ namespace AgvPathViewer
                 DrawSeriesPath(g, _series[i]);
 
             DrawLayout(g);
-
             DrawNodes(g);
 
             if (_chkBuilderMode.Checked && _creatingRect)
@@ -1007,11 +1064,11 @@ namespace AgvPathViewer
 
         private void DrawLayout(Graphics g)
         {
-            if (_layout.Items.Count == 0) return;
+            if (_layoutItems.Count == 0) return;
 
             using (var font = new Font("Segoe UI", 10f))
             {
-                foreach (var it in _layout.Items)
+                foreach (var it in _layoutItems)
                 {
                     if (it == null) continue;
 
@@ -1139,8 +1196,6 @@ namespace AgvPathViewer
 
         private void DrawLegend(Graphics g)
         {
-            if (_series.Count == 0) return;
-
             int x = 10;
             int y = _top.Bottom + 10;
 
@@ -1240,11 +1295,6 @@ namespace AgvPathViewer
             return new PointF(x, y);
         }
 
-        private void UpdateStatus(string msg)
-        {
-            _lblStatus.Text = msg;
-        }
-
         private sealed class AgvPoint
         {
             public int Step;
@@ -1258,6 +1308,16 @@ namespace AgvPathViewer
             public string FilePath;
             public List<AgvPoint> Points = new List<AgvPoint>();
             public Color Color = Color.Blue;
+        }
+
+        private sealed class LayoutItem
+        {
+            public string Type;
+            public float X;
+            public float Y;
+            public float W;
+            public float H;
+            public string Text;
         }
 
         public static class InputBox
