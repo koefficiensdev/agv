@@ -90,7 +90,7 @@ namespace AgvPathViewer
         public MainForm()
         {
             Text = "AGV Movement Path Viewer (Nodes + Logs)";
-            Width = 1550;
+            Width = 1600;
             Height = 900;
             StartPosition = FormStartPosition.CenterScreen;
             KeyPreview = true;
@@ -178,8 +178,19 @@ namespace AgvPathViewer
             _btnSaveLayout.Click += (s, e) => SaveLayout();
             _top.Controls.Add(_btnSaveLayout);
 
-            _btnLoadLayout = new Button { Text = "Load Layout", Left = 1570, Top = 12, Width = 95, Height = 30, Visible = false };
-            _btnClearLayout = new Button { Text = "Clear Layout", Left = 1670, Top = 12, Width = 95, Height = 30, Visible = false };
+            _btnLoadLayout = new Button { Text = "Load Layout", Left = 1570, Top = 12, Width = 95, Height = 30 };
+            _btnLoadLayout.Click += (s, e) => LoadLayout();
+            _top.Controls.Add(_btnLoadLayout);
+
+            _btnClearLayout = new Button { Text = "Clear Layout", Left = 1670, Top = 12, Width = 95, Height = 30 };
+            _btnClearLayout.Click += (s, e) =>
+            {
+                _layoutItems.Clear();
+                _selectedLayoutItem = null;
+                ComputeWorldBounds();
+                Redraw();
+            };
+            _top.Controls.Add(_btnClearLayout);
 
             _canvas = new DoubleBufferedPictureBox { Dock = DockStyle.Fill, BackColor = Color.White, TabStop = true };
             _canvas.Paint += Canvas_Paint;
@@ -246,6 +257,8 @@ namespace AgvPathViewer
             _btnToolRect.Enabled = bm;
             _btnToolText.Enabled = bm;
             _btnSaveLayout.Enabled = bm;
+            _btnLoadLayout.Enabled = bm;
+            _btnClearLayout.Enabled = bm;
 
             _btnToolSelect.BackColor = (_builderTool == BuilderTool.Select && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
             _btnToolRect.BackColor = (_builderTool == BuilderTool.Rect && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
@@ -537,6 +550,68 @@ namespace AgvPathViewer
             }
         }
 
+        private void LoadLayout()
+        {
+            using (var ofd = new OpenFileDialog())
+            {
+                ofd.Title = "Load Layout";
+                ofd.Filter = "Layout (*.layout)|*.layout|All files (*.*)|*.*";
+                ofd.Multiselect = false;
+
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+
+                try
+                {
+                    var items = new List<LayoutItem>();
+
+                    using (var sr = new StreamReader(ofd.FileName, Encoding.UTF8, true))
+                    {
+                        string header = sr.ReadLine();
+                        if (header == null || header.Trim() != "LAYOUT1")
+                            throw new Exception("Invalid layout file.");
+
+                        string line;
+                        while ((line = sr.ReadLine()) != null)
+                        {
+                            if (string.IsNullOrWhiteSpace(line)) continue;
+                            var parts = line.Split(new[] { '|' }, 6);
+                            if (parts.Length < 6) continue;
+
+                            string type = (parts[0] ?? "").Trim().ToLowerInvariant();
+
+                            float x = ParseFloatInvariant(parts[1]);
+                            float y = ParseFloatInvariant(parts[2]);
+                            float w = ParseFloatInvariant(parts[3]);
+                            float h = ParseFloatInvariant(parts[4]);
+                            string text = UnescapeText(parts[5]);
+
+                            if (type != "rect" && type != "text") continue;
+
+                            items.Add(new LayoutItem
+                            {
+                                Type = type,
+                                X = x,
+                                Y = y,
+                                W = w,
+                                H = h,
+                                Text = (type == "text") ? text : null
+                            });
+                        }
+                    }
+
+                    _layoutItems.Clear();
+                    _layoutItems.AddRange(items);
+                    _selectedLayoutItem = null;
+                    ComputeWorldBounds();
+                    Redraw();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Failed to load layout:\n\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
         private static string EscapeText(string s)
         {
             if (s == null) return "";
@@ -789,6 +864,41 @@ namespace AgvPathViewer
             return dict;
         }
 
+        private static bool TryParseSignal0to100(string raw, out int sig)
+        {
+            sig = 0;
+            if (raw == null) return false;
+
+            string s = raw.Trim().Trim('"').Trim();
+            if (s.Length == 0) return false;
+
+            s = s.Replace("%", "").Trim();
+
+            int si;
+            if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out si) ||
+                int.TryParse(s, NumberStyles.Integer, CultureInfo.CurrentCulture, out si))
+            {
+                if (si < 0) si = 0;
+                if (si > 100) si = 100;
+                sig = si;
+                return true;
+            }
+
+            float sf;
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out sf) ||
+                float.TryParse(s.Replace(',', '.'), NumberStyles.Float, CultureInfo.InvariantCulture, out sf) ||
+                float.TryParse(s, NumberStyles.Float, CultureInfo.CurrentCulture, out sf))
+            {
+                int v = (int)Math.Round(sf);
+                if (v < 0) v = 0;
+                if (v > 100) v = 100;
+                sig = v;
+                return true;
+            }
+
+            return false;
+        }
+
         private static List<AgvPoint> ParseAgvLogCsv_NoDate(string path, Dictionary<string, PointF> nodes, out List<WifiSample> wifiSamples)
         {
             wifiSamples = new List<WifiSample>();
@@ -811,7 +921,7 @@ namespace AgvPathViewer
             if (iNode < 0)
                 throw new Exception("Log CSV '" + Path.GetFileName(path) + "' needs a node column. Found: [" + string.Join(", ", header.Select(h => (h ?? "").Trim())) + "]");
 
-            int iSig = FindCol(header, "wifisig", "wifi_sig", "wifisignal", "wifi_signal", "rssi", "signal");
+            int iSig = FindCol(header, "wifisig", "wifi_sig", "wifisignal", "wifi_signal", "wifi", "signal", "sig", "rssi");
             int iMac = FindCol(header, "wifimac", "wifi_mac", "bssid", "ap", "apmac", "mac");
 
             var list = new List<AgvPoint>();
@@ -834,14 +944,10 @@ namespace AgvPathViewer
                 if (iSig >= 0 && iMac >= 0 && cols.Length > Math.Max(iSig, iMac))
                 {
                     var mac = (cols[iMac] ?? "").Trim().Trim('"').Trim();
-                    var sigStr = (cols[iSig] ?? "").Trim().Trim('"').Trim();
+                    var sigStr = cols[iSig];
                     int sig;
-                    if (!string.IsNullOrEmpty(mac) && int.TryParse(sigStr, NumberStyles.Integer, CultureInfo.InvariantCulture, out sig))
-                    {
-                        if (sig < 0) sig = 0;
-                        if (sig > 100) sig = 100;
+                    if (!string.IsNullOrEmpty(mac) && TryParseSignal0to100(sigStr, out sig))
                         wifiSamples.Add(new WifiSample { Mac = mac, Signal = sig, NodeId = nodeId, XY = xy });
-                    }
                 }
             }
 
@@ -1018,6 +1124,32 @@ namespace AgvPathViewer
                 _cmbAp.SelectedIndex = 0;
         }
 
+        private int TotalWifiSamples()
+        {
+            int n = 0;
+            for (int i = 0; i < _series.Count; i++)
+            {
+                if (_series[i].Wifi != null) n += _series[i].Wifi.Count;
+            }
+            return n;
+        }
+
+        private int TotalAps()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < _series.Count; i++)
+            {
+                var w = _series[i].Wifi;
+                if (w == null) continue;
+                for (int j = 0; j < w.Count; j++)
+                {
+                    var m = (w[j].Mac ?? "").Trim();
+                    if (m.Length > 0) set.Add(m);
+                }
+            }
+            return set.Count;
+        }
+
         private void Canvas_Paint(object sender, PaintEventArgs e)
         {
             var g = e.Graphics;
@@ -1056,27 +1188,30 @@ namespace AgvPathViewer
 
         private void DrawWifiHeatmap(Graphics g)
         {
+            if (_nodes.Count == 0) return;
+
             string selected = (_cmbAp.SelectedItem as string) ?? "ALL";
             bool all = string.Equals(selected, "ALL", StringComparison.OrdinalIgnoreCase);
 
-            var dict = new Dictionary<string, Dictionary<string, SigAgg>>(StringComparer.OrdinalIgnoreCase);
+            var perApPerNode = new Dictionary<string, Dictionary<string, SigAgg>>(StringComparer.OrdinalIgnoreCase);
 
             for (int si = 0; si < _series.Count; si++)
             {
                 var s = _series[si];
-                if (s.Wifi == null) continue;
+                var wifi = s.Wifi;
+                if (wifi == null || wifi.Count == 0) continue;
 
-                for (int i = 0; i < s.Wifi.Count; i++)
+                for (int i = 0; i < wifi.Count; i++)
                 {
-                    var w = s.Wifi[i];
+                    var w = wifi[i];
                     if (string.IsNullOrWhiteSpace(w.Mac)) continue;
                     if (!all && !string.Equals(w.Mac, selected, StringComparison.OrdinalIgnoreCase)) continue;
 
                     Dictionary<string, SigAgg> perNode;
-                    if (!dict.TryGetValue(w.Mac, out perNode))
+                    if (!perApPerNode.TryGetValue(w.Mac, out perNode))
                     {
                         perNode = new Dictionary<string, SigAgg>(StringComparer.OrdinalIgnoreCase);
-                        dict[w.Mac] = perNode;
+                        perApPerNode[w.Mac] = perNode;
                     }
 
                     SigAgg agg;
@@ -1089,10 +1224,13 @@ namespace AgvPathViewer
                 }
             }
 
-            int radius = 26;
-            foreach (var kvMac in dict)
+            if (perApPerNode.Count == 0) return;
+
+            int radius = 30;
+
+            foreach (var kvAp in perApPerNode)
             {
-                foreach (var kvNode in kvMac.Value)
+                foreach (var kvNode in kvAp.Value)
                 {
                     PointF xy;
                     if (!_nodes.TryGetValue(kvNode.Key, out xy)) continue;
@@ -1102,17 +1240,15 @@ namespace AgvPathViewer
                     if (sig < 0) sig = 0;
                     if (sig > 100) sig = 100;
 
-                    int alpha = 35 + (int)Math.Round(sig * 1.6);
-                    if (alpha < 35) alpha = 35;
-                    if (alpha > 200) alpha = 200;
+                    int alpha = 60 + (int)Math.Round(sig * 1.4);
+                    if (alpha < 60) alpha = 60;
+                    if (alpha > 210) alpha = 210;
 
                     var col = SignalToColor(sig, alpha);
                     var p = WorldToScreen(xy);
 
                     using (var b = new SolidBrush(col))
-                    {
                         g.FillEllipse(b, p.X - radius, p.Y - radius, radius * 2, radius * 2);
-                    }
                 }
             }
         }
@@ -1309,22 +1445,26 @@ namespace AgvPathViewer
                 }
             }
 
+            using (var font = new Font("Segoe UI", 9f))
+            {
+                if (_chkWifiHeatmap.Checked)
+                {
+                    string sel = (_cmbAp.SelectedItem as string) ?? "ALL";
+                    g.DrawString("WiFi heatmap: " + sel + " | APs: " + TotalAps() + " | Samples: " + TotalWifiSamples(), font, Brushes.Black, 10, y + 8);
+                }
+                else
+                {
+                    g.DrawString("WiFi samples: " + TotalWifiSamples() + " | APs: " + TotalAps(), font, Brushes.Black, 10, y + 8);
+                }
+            }
+
             if (_chkBuilderMode.Checked)
             {
                 using (var font = new Font("Segoe UI", 9f))
                 {
                     string tool = _builderTool.ToString();
                     string hint = "Builder: " + tool + " | Space+Left: pan | Middle: pan | Delete: remove | Ctrl+S: save";
-                    g.DrawString(hint, font, Brushes.Black, 10, y + 8);
-                }
-            }
-
-            if (_chkWifiHeatmap.Checked)
-            {
-                using (var font = new Font("Segoe UI", 9f))
-                {
-                    string sel = (_cmbAp.SelectedItem as string) ?? "ALL";
-                    g.DrawString("WiFi heatmap: " + sel, font, Brushes.Black, 10, y + 28);
+                    g.DrawString(hint, font, Brushes.Black, 10, y + 28);
                 }
             }
         }
