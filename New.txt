@@ -32,7 +32,7 @@ namespace AgvPathViewer
 
     public sealed class MainForm : Form
     {
-        private readonly Panel _top;
+        private readonly FlowLayoutPanel _top;
         private readonly Button _btnLoadNodes;
         private readonly Button _btnLoadLogs;
         private readonly Button _btnClearLogs;
@@ -48,18 +48,25 @@ namespace AgvPathViewer
         private readonly Button _btnToolRect;
         private readonly Button _btnToolText;
         private readonly Button _btnToolAp;
+
         private readonly Button _btnSaveLayout;
         private readonly Button _btnLoadLayout;
         private readonly Button _btnClearLayout;
 
-        private readonly Button _btnRectColor;
-        private readonly Button _btnSelectedRectColor;
-
         private readonly Panel _right;
-        private readonly Label _lblAps;
+        private readonly TabControl _tabs;
+
+        private readonly TabPage _tabAps;
         private readonly CheckedListBox _lstAps;
         private readonly Button _btnRenameAp;
         private readonly Button _btnRemoveAp;
+
+        private readonly TabPage _tabRects;
+        private readonly ListBox _lstRects;
+        private readonly Button _btnRectPickNew;
+        private readonly Button _btnRectColorSelected;
+        private readonly Button _btnRectRename;
+        private readonly Button _btnRectRemove;
 
         private readonly DoubleBufferedPictureBox _canvas;
         private readonly Timer _debounceTimer;
@@ -98,7 +105,7 @@ namespace AgvPathViewer
 
         private bool _spaceDown = false;
 
-        private Color _currentRectColor = Color.FromArgb(70, 80, 80, 80);
+        private Color _currentRectColor = Color.FromArgb(90, 80, 80, 80);
 
         public MainForm()
         {
@@ -108,57 +115,50 @@ namespace AgvPathViewer
             StartPosition = FormStartPosition.CenterScreen;
             KeyPreview = true;
 
-            _top = new Panel { Dock = DockStyle.Top, Height = 56 };
+            _top = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = 62,
+                WrapContents = false,
+                AutoScroll = true,
+                Padding = new Padding(8, 10, 8, 8)
+            };
             Controls.Add(_top);
 
-            _btnLoadNodes = new Button { Text = "Load Nodes CSV", Left = 10, Top = 12, Width = 140, Height = 30 };
-            _btnLoadNodes.Click += (s, e) => LoadNodesCsv();
-            _top.Controls.Add(_btnLoadNodes);
-
-            _btnLoadLogs = new Button { Text = "Load AGV Log CSV(s)", Left = 160, Top = 12, Width = 170, Height = 30 };
-            _btnLoadLogs.Click += (s, e) => LoadAgvLogs();
-            _top.Controls.Add(_btnLoadLogs);
-
-            _btnClearLogs = new Button { Text = "Clear Logs", Left = 340, Top = 12, Width = 100, Height = 30 };
-            _btnClearLogs.Click += (s, e) =>
+            _btnLoadNodes = MakeBtn("Load Nodes CSV", 130, (s, e) => LoadNodesCsv());
+            _btnLoadLogs = MakeBtn("Load AGV Log CSV(s)", 155, (s, e) => LoadAgvLogs());
+            _btnClearLogs = MakeBtn("Clear Logs", 95, (s, e) =>
             {
                 _series.Clear();
                 StopWatchers();
                 RefreshApList();
                 ComputeWorldBounds();
                 Redraw();
-            };
-            _top.Controls.Add(_btnClearLogs);
+            });
 
-            _chkAutoRefresh = new CheckBox { Text = "Auto-refresh", Left = 450, Top = 17, Width = 110 };
+            _chkAutoRefresh = new CheckBox { Text = "Auto-refresh", AutoSize = true, Margin = new Padding(10, 8, 6, 0) };
             _chkAutoRefresh.CheckedChanged += (s, e) =>
             {
                 if (_chkAutoRefresh.Checked) StartWatchers();
                 else StopWatchers();
             };
-            _top.Controls.Add(_chkAutoRefresh);
 
-            _btnResetView = new Button { Text = "Reset View", Left = 565, Top = 12, Width = 95, Height = 30 };
-            _btnResetView.Click += (s, e) => ResetView();
-            _top.Controls.Add(_btnResetView);
+            _btnResetView = MakeBtn("Reset View", 90, (s, e) => ResetView());
 
-            _chkShowNodeLabels = new CheckBox { Text = "Show node labels", Left = 670, Top = 17, Width = 140, Checked = true };
+            _chkShowNodeLabels = new CheckBox { Text = "Show node labels", AutoSize = true, Margin = new Padding(10, 8, 6, 0), Checked = true };
             _chkShowNodeLabels.CheckedChanged += (s, e) => Redraw();
-            _top.Controls.Add(_chkShowNodeLabels);
 
-            _chkWifiHeatmap = new CheckBox { Text = "WiFi heatmap", Left = 820, Top = 17, Width = 110, Checked = false };
+            _chkWifiHeatmap = new CheckBox { Text = "WiFi heatmap", AutoSize = true, Margin = new Padding(10, 8, 6, 0) };
             _chkWifiHeatmap.CheckedChanged += (s, e) =>
             {
                 _cmbAp.Enabled = _chkWifiHeatmap.Checked;
                 Redraw();
             };
-            _top.Controls.Add(_chkWifiHeatmap);
 
-            _cmbAp = new ComboBox { Left = 935, Top = 14, Width = 210, DropDownStyle = ComboBoxStyle.DropDownList, Enabled = false };
+            _cmbAp = new ComboBox { Width = 210, DropDownStyle = ComboBoxStyle.DropDownList, Enabled = false, Margin = new Padding(6, 6, 6, 0) };
             _cmbAp.SelectedIndexChanged += (s, e) => Redraw();
-            _top.Controls.Add(_cmbAp);
 
-            _chkBuilderMode = new CheckBox { Text = "Builder mode", Left = 1155, Top = 17, Width = 110 };
+            _chkBuilderMode = new CheckBox { Text = "Builder mode", AutoSize = true, Margin = new Padding(12, 8, 6, 0) };
             _chkBuilderMode.CheckedChanged += (s, e) =>
             {
                 if (!_chkBuilderMode.Checked)
@@ -170,81 +170,107 @@ namespace AgvPathViewer
                     _panning = false;
                     _canvas.Cursor = Cursors.Default;
                 }
-                UpdateBuilderButtons();
+                UpdateUiStates();
                 Redraw();
             };
-            _top.Controls.Add(_chkBuilderMode);
 
-            _btnToolSelect = new Button { Text = "Select", Left = 1265, Top = 12, Width = 70, Height = 30 };
-            _btnToolSelect.Click += (s, e) => { _builderTool = BuilderTool.Select; UpdateBuilderButtons(); };
-            _top.Controls.Add(_btnToolSelect);
+            _btnToolSelect = MakeBtn("Select", 70, (s, e) => { _builderTool = BuilderTool.Select; UpdateUiStates(); });
+            _btnToolRect = MakeBtn("Rect", 60, (s, e) => { _builderTool = BuilderTool.Rect; UpdateUiStates(); });
+            _btnToolText = MakeBtn("Text", 60, (s, e) => { _builderTool = BuilderTool.Text; UpdateUiStates(); });
+            _btnToolAp = MakeBtn("AP", 50, (s, e) => { _builderTool = BuilderTool.AccessPoint; UpdateUiStates(); });
 
-            _btnToolRect = new Button { Text = "Rect", Left = 1340, Top = 12, Width = 60, Height = 30 };
-            _btnToolRect.Click += (s, e) => { _builderTool = BuilderTool.Rect; UpdateBuilderButtons(); };
-            _top.Controls.Add(_btnToolRect);
-
-            _btnToolText = new Button { Text = "Text", Left = 1405, Top = 12, Width = 60, Height = 30 };
-            _btnToolText.Click += (s, e) => { _builderTool = BuilderTool.Text; UpdateBuilderButtons(); };
-            _top.Controls.Add(_btnToolText);
-
-            _btnToolAp = new Button { Text = "AP", Left = 1470, Top = 12, Width = 50, Height = 30 };
-            _btnToolAp.Click += (s, e) => { _builderTool = BuilderTool.AccessPoint; UpdateBuilderButtons(); };
-            _top.Controls.Add(_btnToolAp);
-
-            _btnRectColor = new Button { Text = "Rect color", Left = 1525, Top = 12, Width = 85, Height = 30 };
-            _btnRectColor.Click += (s, e) => PickCurrentRectColor();
-            _top.Controls.Add(_btnRectColor);
-
-            _btnSelectedRectColor = new Button { Text = "Set selected", Left = 1615, Top = 12, Width = 95, Height = 30 };
-            _btnSelectedRectColor.Click += (s, e) => SetSelectedRectColor();
-            _top.Controls.Add(_btnSelectedRectColor);
-
-            _btnSaveLayout = new Button { Text = "Save Layout", Left = 1715, Top = 12, Width = 95, Height = 30 };
-            _btnSaveLayout.Click += (s, e) => SaveLayout();
-            _top.Controls.Add(_btnSaveLayout);
-
-            _btnLoadLayout = new Button { Text = "Load Layout", Left = 1815, Top = 12, Width = 95, Height = 30 };
-            _btnLoadLayout.Click += (s, e) => LoadLayout();
-            _top.Controls.Add(_btnLoadLayout);
-
-            _btnClearLayout = new Button { Text = "Clear Layout", Left = 1915, Top = 12, Width = 95, Height = 30 };
-            _btnClearLayout.Click += (s, e) =>
+            _btnSaveLayout = MakeBtn("Save Layout", 95, (s, e) => SaveLayout());
+            _btnLoadLayout = MakeBtn("Load Layout", 95, (s, e) => LoadLayout());
+            _btnClearLayout = MakeBtn("Clear Layout", 95, (s, e) =>
             {
                 _layoutItems.Clear();
                 _selectedLayoutItem = null;
                 RefreshApSideList();
+                RefreshRectSideList();
                 ComputeWorldBounds();
+                UpdateUiStates();
                 Redraw();
-            };
-            _top.Controls.Add(_btnClearLayout);
+            });
 
-            _right = new Panel { Dock = DockStyle.Right, Width = 260, Padding = new Padding(10) };
-            Controls.Add(_right);
-
-            _lblAps = new Label { Text = "Access Points (toggle on/off)", Dock = DockStyle.Top, Height = 22 };
-            _right.Controls.Add(_lblAps);
-
-            _lstAps = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true };
-            _lstAps.ItemCheck += (s, e) =>
+            _top.Controls.AddRange(new Control[]
             {
-                BeginInvoke((Action)(() =>
+                _btnLoadNodes, _btnLoadLogs, _btnClearLogs,
+                _chkAutoRefresh, _btnResetView,
+                _chkShowNodeLabels,
+                _chkWifiHeatmap, _cmbAp,
+                _chkBuilderMode,
+                _btnToolSelect, _btnToolRect, _btnToolText, _btnToolAp,
+                _btnSaveLayout, _btnLoadLayout, _btnClearLayout
+            });
+
+            _right = new Panel { Dock = DockStyle.Right, Width = 300, Padding = new Padding(10) };
+
+            _tabs = new TabControl { Dock = DockStyle.Fill };
+
+            _tabAps = new TabPage("Access Points");
+            _lstAps = new CheckedListBox { Dock = DockStyle.Fill, CheckOnClick = true };
+            _lstAps.ItemCheck += (s, e) => BeginInvoke((Action)(() =>
+            {
+                SyncApEnabledFromSideList();
+                Redraw();
+            }));
+            _lstAps.SelectedIndexChanged += (s, e) =>
+            {
+                var ap = GetSelectedApItem();
+                if (ap != null)
                 {
-                    SyncApEnabledFromSideList();
+                    _selectedLayoutItem = ap;
+                    UpdateUiStates();
                     Redraw();
-                }));
+                }
             };
-            _right.Controls.Add(_lstAps);
 
             var apButtons = new Panel { Dock = DockStyle.Bottom, Height = 72 };
-            _right.Controls.Add(apButtons);
-
-            _btnRenameAp = new Button { Text = "Rename", Left = 0, Top = 6, Width = 110, Height = 28 };
+            _btnRenameAp = new Button { Text = "Rename", Width = 120, Height = 28, Left = 0, Top = 8 };
+            _btnRemoveAp = new Button { Text = "Remove", Width = 120, Height = 28, Left = 130, Top = 8 };
             _btnRenameAp.Click += (s, e) => RenameSelectedAp();
-            apButtons.Controls.Add(_btnRenameAp);
-
-            _btnRemoveAp = new Button { Text = "Remove", Left = 120, Top = 6, Width = 110, Height = 28 };
             _btnRemoveAp.Click += (s, e) => RemoveSelectedAp();
-            apButtons.Controls.Add(_btnRemoveAp);
+            apButtons.Controls.AddRange(new Control[] { _btnRenameAp, _btnRemoveAp });
+
+            _tabAps.Controls.Add(_lstAps);
+            _tabAps.Controls.Add(apButtons);
+
+            _tabRects = new TabPage("Rectangles");
+            _lstRects = new ListBox { Dock = DockStyle.Fill };
+            _lstRects.SelectedIndexChanged += (s, e) =>
+            {
+                var r = GetSelectedRectItem();
+                if (r != null)
+                {
+                    _selectedLayoutItem = r;
+                    UpdateUiStates();
+                    Redraw();
+                }
+            };
+
+            var rectButtons = new Panel { Dock = DockStyle.Bottom, Height = 110 };
+
+            _btnRectPickNew = new Button { Text = "New rect color", Width = 120, Height = 28, Left = 0, Top = 8 };
+            _btnRectPickNew.Click += (s, e) => PickCurrentRectColor();
+
+            _btnRectColorSelected = new Button { Text = "Set selected color", Width = 160, Height = 28, Left = 130, Top = 8 };
+            _btnRectColorSelected.Click += (s, e) => SetSelectedRectColor();
+
+            _btnRectRename = new Button { Text = "Rename", Width = 120, Height = 28, Left = 0, Top = 44 };
+            _btnRectRename.Click += (s, e) => RenameSelectedRect();
+
+            _btnRectRemove = new Button { Text = "Remove", Width = 120, Height = 28, Left = 130, Top = 44 };
+            _btnRectRemove.Click += (s, e) => RemoveSelectedRect();
+
+            rectButtons.Controls.AddRange(new Control[] { _btnRectPickNew, _btnRectColorSelected, _btnRectRename, _btnRectRemove });
+
+            _tabRects.Controls.Add(_lstRects);
+            _tabRects.Controls.Add(rectButtons);
+
+            _tabs.TabPages.Add(_tabAps);
+            _tabs.TabPages.Add(_tabRects);
+
+            _right.Controls.Add(_tabs);
 
             _canvas = new DoubleBufferedPictureBox { Dock = DockStyle.Fill, BackColor = Color.White, TabStop = true };
             _canvas.Paint += Canvas_Paint;
@@ -255,7 +281,9 @@ namespace AgvPathViewer
             _canvas.MouseUp += Canvas_MouseUp;
             _canvas.MouseClick += Canvas_MouseClick;
             _canvas.MouseEnter += (s, e) => _canvas.Focus();
+
             Controls.Add(_canvas);
+            Controls.Add(_right);
 
             _debounceTimer = new Timer { Interval = 350 };
             _debounceTimer.Tick += (s, e) =>
@@ -268,31 +296,57 @@ namespace AgvPathViewer
                 }
             };
 
-            _tip = new ToolTip();
-            _tip.ShowAlways = true;
-            _tip.AutoPopDelay = 4000;
-            _tip.InitialDelay = 0;
-            _tip.ReshowDelay = 0;
+            _tip = new ToolTip { ShowAlways = true, AutoPopDelay = 4000, InitialDelay = 0, ReshowDelay = 0 };
 
             KeyDown += MainForm_KeyDown;
             KeyUp += MainForm_KeyUp;
 
-            UpdateBuilderButtons();
             RefreshApList();
             RefreshApSideList();
+            RefreshRectSideList();
+            UpdateUiStates();
+        }
+
+        private Button MakeBtn(string text, int w, EventHandler onClick)
+        {
+            var b = new Button { Text = text, Width = w, Height = 30, Margin = new Padding(6, 4, 0, 0) };
+            b.Click += onClick;
+            return b;
+        }
+
+        private void UpdateUiStates()
+        {
+            bool bm = _chkBuilderMode.Checked;
+
+            _btnToolSelect.Enabled = bm;
+            _btnToolRect.Enabled = bm;
+            _btnToolText.Enabled = bm;
+            _btnToolAp.Enabled = bm;
+            _btnSaveLayout.Enabled = bm;
+            _btnLoadLayout.Enabled = bm;
+            _btnClearLayout.Enabled = bm;
+
+            _btnToolSelect.BackColor = (bm && _builderTool == BuilderTool.Select) ? SystemColors.ActiveCaption : SystemColors.Control;
+            _btnToolRect.BackColor = (bm && _builderTool == BuilderTool.Rect) ? SystemColors.ActiveCaption : SystemColors.Control;
+            _btnToolText.BackColor = (bm && _builderTool == BuilderTool.Text) ? SystemColors.ActiveCaption : SystemColors.Control;
+            _btnToolAp.BackColor = (bm && _builderTool == BuilderTool.AccessPoint) ? SystemColors.ActiveCaption : SystemColors.Control;
+
+            bool selRect = bm && _selectedLayoutItem != null && string.Equals(_selectedLayoutItem.Type, "rect", StringComparison.OrdinalIgnoreCase);
+            _btnRectColorSelected.Enabled = selRect;
+            _btnRectRename.Enabled = selRect;
+            _btnRectRemove.Enabled = selRect;
+
+            bool selAp = bm && _selectedLayoutItem != null && string.Equals(_selectedLayoutItem.Type, "ap", StringComparison.OrdinalIgnoreCase);
+            _btnRenameAp.Enabled = selAp;
+            _btnRemoveAp.Enabled = selAp;
         }
 
         private void PickCurrentRectColor()
         {
-            using (var cd = new ColorDialog())
+            using (var cd = new ColorDialog { FullOpen = true, Color = Color.FromArgb(_currentRectColor.R, _currentRectColor.G, _currentRectColor.B) })
             {
-                cd.FullOpen = true;
-                cd.Color = _currentRectColor;
                 if (cd.ShowDialog(this) == DialogResult.OK)
-                {
-                    _currentRectColor = Color.FromArgb(80, cd.Color.R, cd.Color.G, cd.Color.B);
-                    Redraw();
-                }
+                    _currentRectColor = Color.FromArgb(120, cd.Color.R, cd.Color.G, cd.Color.B);
             }
         }
 
@@ -302,28 +356,50 @@ namespace AgvPathViewer
             if (_selectedLayoutItem == null) return;
             if (!string.Equals(_selectedLayoutItem.Type, "rect", StringComparison.OrdinalIgnoreCase)) return;
 
-            using (var cd = new ColorDialog())
+            var current = _selectedLayoutItem.ColorArgb != 0 ? Color.FromArgb(_selectedLayoutItem.ColorArgb) : _currentRectColor;
+            using (var cd = new ColorDialog { FullOpen = true, Color = Color.FromArgb(current.R, current.G, current.B) })
             {
-                cd.FullOpen = true;
-                cd.Color = Color.FromArgb(_selectedLayoutItem.ColorArgb == 0 ? _currentRectColor.ToArgb() : _selectedLayoutItem.ColorArgb);
                 if (cd.ShowDialog(this) == DialogResult.OK)
                 {
-                    _selectedLayoutItem.ColorArgb = Color.FromArgb(80, cd.Color.R, cd.Color.G, cd.Color.B).ToArgb();
+                    _selectedLayoutItem.ColorArgb = Color.FromArgb(120, cd.Color.R, cd.Color.G, cd.Color.B).ToArgb();
                     Redraw();
+                    RefreshRectSideList(true);
                 }
             }
+        }
+
+        private void RenameSelectedRect()
+        {
+            var r = GetSelectedRectItem();
+            if (r == null) return;
+            string cur = r.Text ?? "";
+            string name = InputBox.Show(this, "Rename Rectangle", "Name:", cur);
+            if (string.IsNullOrWhiteSpace(name)) return;
+            r.Text = name.Trim();
+            RefreshRectSideList(true);
+            Redraw();
+        }
+
+        private void RemoveSelectedRect()
+        {
+            var r = GetSelectedRectItem();
+            if (r == null) return;
+            _layoutItems.Remove(r);
+            if (ReferenceEquals(_selectedLayoutItem, r)) _selectedLayoutItem = null;
+            RefreshRectSideList();
+            ComputeWorldBounds();
+            UpdateUiStates();
+            Redraw();
         }
 
         private void RenameSelectedAp()
         {
             var ap = GetSelectedApItem();
             if (ap == null) return;
-
-            string current = ap.Text ?? "";
-            string txt = InputBox.Show(this, "Rename AP", "New name:", current);
-            if (string.IsNullOrWhiteSpace(txt)) return;
-
-            ap.Text = txt.Trim();
+            string cur = ap.Text ?? "";
+            string name = InputBox.Show(this, "Rename AP", "Name:", cur);
+            if (string.IsNullOrWhiteSpace(name)) return;
+            ap.Text = name.Trim();
             RefreshApSideList(true);
             Redraw();
         }
@@ -332,46 +408,51 @@ namespace AgvPathViewer
         {
             var ap = GetSelectedApItem();
             if (ap == null) return;
-
             _layoutItems.Remove(ap);
             if (ReferenceEquals(_selectedLayoutItem, ap)) _selectedLayoutItem = null;
-
             RefreshApSideList();
             ComputeWorldBounds();
+            UpdateUiStates();
             Redraw();
         }
 
         private LayoutItem GetSelectedApItem()
         {
             if (_lstAps.SelectedIndex < 0) return null;
-            var obj = _lstAps.Items[_lstAps.SelectedIndex] as ApListItem;
-            if (obj == null) return null;
-            var id = obj.Id;
+            if (!(_lstAps.Items[_lstAps.SelectedIndex] is SideItem si)) return null;
+            var id = si.Id;
+            return _layoutItems.FirstOrDefault(x => x != null && x.Type == "ap" && string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        }
 
-            for (int i = 0; i < _layoutItems.Count; i++)
-                if (string.Equals(_layoutItems[i].Type, "ap", StringComparison.OrdinalIgnoreCase) && string.Equals(_layoutItems[i].Id, id, StringComparison.OrdinalIgnoreCase))
-                    return _layoutItems[i];
+        private LayoutItem GetSelectedRectItem()
+        {
+            if (_lstRects.SelectedIndex < 0) return null;
+            if (!(_lstRects.Items[_lstRects.SelectedIndex] is SideItem si)) return null;
+            var id = si.Id;
+            return _layoutItems.FirstOrDefault(x => x != null && x.Type == "rect" && string.Equals(x.Id, id, StringComparison.OrdinalIgnoreCase));
+        }
 
-            return null;
+        private sealed class SideItem
+        {
+            public string Id;
+            public string Name;
+            public override string ToString() => Name;
         }
 
         private void RefreshApSideList(bool keepSelection = false)
         {
             string selId = null;
-            if (keepSelection && _lstAps.SelectedItem is ApListItem cur) selId = cur.Id;
+            if (keepSelection && _lstAps.SelectedItem is SideItem cur) selId = cur.Id;
 
             _lstAps.BeginUpdate();
             _lstAps.Items.Clear();
 
-            var aps = _layoutItems
-                .Where(x => x != null && string.Equals(x.Type, "ap", StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
+            var aps = _layoutItems.Where(x => x != null && x.Type == "ap").ToList();
             for (int i = 0; i < aps.Count; i++)
             {
                 var it = aps[i];
-                var name = string.IsNullOrWhiteSpace(it.Text) ? ("AP " + (i + 1)) : it.Text.Trim();
-                var li = new ApListItem { Id = it.Id, Name = name };
+                string name = string.IsNullOrWhiteSpace(it.Text) ? ("AP " + (i + 1)) : it.Text.Trim();
+                var li = new SideItem { Id = it.Id, Name = name };
                 int idx = _lstAps.Items.Add(li, it.Enabled);
                 if (selId != null && string.Equals(li.Id, selId, StringComparison.OrdinalIgnoreCase))
                     _lstAps.SelectedIndex = idx;
@@ -380,31 +461,44 @@ namespace AgvPathViewer
             _lstAps.EndUpdate();
         }
 
+        private void RefreshRectSideList(bool keepSelection = false)
+        {
+            string selId = null;
+            if (keepSelection && _lstRects.SelectedItem is SideItem cur) selId = cur.Id;
+
+            _lstRects.BeginUpdate();
+            _lstRects.Items.Clear();
+
+            var rects = _layoutItems.Where(x => x != null && x.Type == "rect").ToList();
+            for (int i = 0; i < rects.Count; i++)
+            {
+                var it = rects[i];
+                string name = string.IsNullOrWhiteSpace(it.Text) ? ("Rect " + (i + 1)) : it.Text.Trim();
+                var li = new SideItem { Id = it.Id, Name = name };
+                int idx = _lstRects.Items.Add(li);
+                if (selId != null && string.Equals(li.Id, selId, StringComparison.OrdinalIgnoreCase))
+                    _lstRects.SelectedIndex = idx;
+            }
+
+            _lstRects.EndUpdate();
+        }
+
         private void SyncApEnabledFromSideList()
         {
-            var enabledById = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+            var enabled = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
             for (int i = 0; i < _lstAps.Items.Count; i++)
             {
-                if (_lstAps.Items[i] is ApListItem li)
-                    enabledById[li.Id] = _lstAps.GetItemChecked(i);
+                if (_lstAps.Items[i] is SideItem li)
+                    enabled[li.Id] = _lstAps.GetItemChecked(i);
             }
 
             for (int i = 0; i < _layoutItems.Count; i++)
             {
                 var it = _layoutItems[i];
-                if (it == null) continue;
-                if (!string.Equals(it.Type, "ap", StringComparison.OrdinalIgnoreCase)) continue;
-
-                if (enabledById.TryGetValue(it.Id, out bool en))
+                if (it == null || it.Type != "ap") continue;
+                if (enabled.TryGetValue(it.Id, out bool en))
                     it.Enabled = en;
             }
-        }
-
-        private sealed class ApListItem
-        {
-            public string Id;
-            public string Name;
-            public override string ToString() => Name;
         }
 
         private void Canvas_MouseClick(object sender, MouseEventArgs e)
@@ -443,8 +537,7 @@ namespace AgvPathViewer
                     var mac = (w[i].Mac ?? "").Trim();
                     if (mac.Length == 0) continue;
 
-                    SigAgg agg;
-                    if (!perAp.TryGetValue(mac, out agg)) agg = new SigAgg();
+                    if (!perAp.TryGetValue(mac, out var agg)) agg = new SigAgg();
                     agg.Sum += w[i].Signal;
                     agg.Count += 1;
                     perAp[mac] = agg;
@@ -458,8 +551,7 @@ namespace AgvPathViewer
 
             if (!all)
             {
-                SigAgg agg;
-                if (!perAp.TryGetValue(selected, out agg) || agg.Count <= 0) return "WiFi (" + selected + "): no samples";
+                if (!perAp.TryGetValue(selected, out var agg) || agg.Count <= 0) return "WiFi (" + selected + "): no samples";
                 int avg = (int)Math.Round((double)agg.Sum / agg.Count);
                 return "WiFi (" + selected + "): avg " + avg + " / 100  (" + agg.Count + " samples)";
             }
@@ -495,12 +587,7 @@ namespace AgvPathViewer
             return sb.ToString();
         }
 
-        private struct ApAvg
-        {
-            public string Mac;
-            public int Avg;
-            public int Count;
-        }
+        private struct ApAvg { public string Mac; public int Avg; public int Count; }
 
         private bool TryHitNode(Point screenPt, out string nodeId)
         {
@@ -529,7 +616,6 @@ namespace AgvPathViewer
                 nodeId = bestId;
                 return true;
             }
-
             return false;
         }
 
@@ -544,7 +630,9 @@ namespace AgvPathViewer
                     _layoutItems.Remove(_selectedLayoutItem);
                     _selectedLayoutItem = null;
                     RefreshApSideList();
+                    RefreshRectSideList();
                     ComputeWorldBounds();
+                    UpdateUiStates();
                     Redraw();
                 }
 
@@ -562,25 +650,6 @@ namespace AgvPathViewer
         {
             StopWatchers();
             base.OnFormClosed(e);
-        }
-
-        private void UpdateBuilderButtons()
-        {
-            bool bm = _chkBuilderMode.Checked;
-            _btnToolSelect.Enabled = bm;
-            _btnToolRect.Enabled = bm;
-            _btnToolText.Enabled = bm;
-            _btnToolAp.Enabled = bm;
-            _btnRectColor.Enabled = bm;
-            _btnSelectedRectColor.Enabled = bm && _selectedLayoutItem != null && string.Equals(_selectedLayoutItem.Type, "rect", StringComparison.OrdinalIgnoreCase);
-            _btnSaveLayout.Enabled = bm;
-            _btnLoadLayout.Enabled = bm;
-            _btnClearLayout.Enabled = bm;
-
-            _btnToolSelect.BackColor = (_builderTool == BuilderTool.Select && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
-            _btnToolRect.BackColor = (_builderTool == BuilderTool.Rect && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
-            _btnToolText.BackColor = (_builderTool == BuilderTool.Text && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
-            _btnToolAp.BackColor = (_builderTool == BuilderTool.AccessPoint && bm) ? SystemColors.ActiveCaption : SystemColors.Control;
         }
 
         private void ResetView()
@@ -648,8 +717,8 @@ namespace AgvPathViewer
 
                     if (_builderTool == BuilderTool.Text)
                     {
-                        string txt = InputBox.Show(this, "Text", "Enter text:");
-                        if (!string.IsNullOrEmpty(txt))
+                        string txt = InputBox.Show(this, "Text", "Enter text:", "");
+                        if (!string.IsNullOrWhiteSpace(txt))
                         {
                             var item = new LayoutItem
                             {
@@ -667,7 +736,8 @@ namespace AgvPathViewer
                             _selectedLayoutItem = item;
                             ComputeWorldBounds();
                             RefreshApSideList(true);
-                            UpdateBuilderButtons();
+                            RefreshRectSideList(true);
+                            UpdateUiStates();
                             Redraw();
                         }
                         return;
@@ -675,7 +745,7 @@ namespace AgvPathViewer
 
                     if (_builderTool == BuilderTool.AccessPoint)
                     {
-                        string name = InputBox.Show(this, "Access Point", "AP name:");
+                        string name = InputBox.Show(this, "Access Point", "AP name:", "");
                         if (!string.IsNullOrWhiteSpace(name))
                         {
                             var item = new LayoutItem
@@ -693,8 +763,9 @@ namespace AgvPathViewer
                             _layoutItems.Add(item);
                             _selectedLayoutItem = item;
                             RefreshApSideList(true);
+                            RefreshRectSideList(true);
                             ComputeWorldBounds();
-                            UpdateBuilderButtons();
+                            UpdateUiStates();
                             Redraw();
                         }
                         return;
@@ -711,9 +782,20 @@ namespace AgvPathViewer
                             _dragStartWorld = w;
                             _dragStartX = _selectedLayoutItem.X;
                             _dragStartY = _selectedLayoutItem.Y;
+
+                            if (_selectedLayoutItem.Type == "ap")
+                            {
+                                SelectSideItem(_lstAps, _selectedLayoutItem.Id);
+                                _tabs.SelectedTab = _tabAps;
+                            }
+                            if (_selectedLayoutItem.Type == "rect")
+                            {
+                                SelectSideItem(_lstRects, _selectedLayoutItem.Id);
+                                _tabs.SelectedTab = _tabRects;
+                            }
                         }
 
-                        UpdateBuilderButtons();
+                        UpdateUiStates();
                         Redraw();
                         return;
                     }
@@ -722,7 +804,7 @@ namespace AgvPathViewer
                 if (e.Button == MouseButtons.Right)
                 {
                     _selectedLayoutItem = HitTestLayoutItem(e.Location);
-                    UpdateBuilderButtons();
+                    UpdateUiStates();
                     Redraw();
                     return;
                 }
@@ -737,6 +819,26 @@ namespace AgvPathViewer
                 _panStartPanPx = _panPx;
                 _canvas.Cursor = Cursors.Hand;
             }
+        }
+
+        private void SelectSideItem(ListBox lb, string id)
+        {
+            for (int i = 0; i < lb.Items.Count; i++)
+                if (lb.Items[i] is SideItem si && string.Equals(si.Id, id, StringComparison.OrdinalIgnoreCase))
+                {
+                    lb.SelectedIndex = i;
+                    return;
+                }
+        }
+
+        private void SelectSideItem(CheckedListBox lb, string id)
+        {
+            for (int i = 0; i < lb.Items.Count; i++)
+                if (lb.Items[i] is SideItem si && string.Equals(si.Id, id, StringComparison.OrdinalIgnoreCase))
+                {
+                    lb.SelectedIndex = i;
+                    return;
+                }
         }
 
         private void Canvas_MouseMove(object sender, MouseEventArgs e)
@@ -818,15 +920,15 @@ namespace AgvPathViewer
                                 Y = y,
                                 W = w,
                                 H = h,
-                                Text = null,
+                                Text = "Rect",
                                 Enabled = true,
                                 ColorArgb = _currentRectColor.ToArgb()
                             };
                             _layoutItems.Add(item);
                             _selectedLayoutItem = item;
                             ComputeWorldBounds();
-                            RefreshApSideList(true);
-                            UpdateBuilderButtons();
+                            RefreshRectSideList(true);
+                            UpdateUiStates();
                         }
 
                         Redraw();
@@ -858,225 +960,440 @@ namespace AgvPathViewer
                 var it = _layoutItems[i];
                 if (it == null) continue;
 
-                if (string.Equals(it.Type, "rect", StringComparison.OrdinalIgnoreCase))
+                if (it.Type == "rect")
                 {
                     var r = WorldRectToScreen(it.X, it.Y, it.W, it.H);
                     if (r.Contains(screenPt)) return it;
                 }
-                else if (string.Equals(it.Type, "text", StringComparison.OrdinalIgnoreCase))
+                else if (it.Type == "text")
                 {
                     var p = WorldToScreen(new PointF(it.X, it.Y));
                     var box = new RectangleF(p.X - 6, p.Y - 6, 12, 12);
                     if (box.Contains(screenPt)) return it;
                 }
-                else if (string.Equals(it.Type, "ap", StringComparison.OrdinalIgnoreCase))
+                else if (it.Type == "ap")
                 {
                     var p = WorldToScreen(new PointF(it.X, it.Y));
-                    float r = 10f;
-                    var box = new RectangleF(p.X - r, p.Y - r, r * 2, r * 2);
+                    float rr = 10f;
+                    var box = new RectangleF(p.X - rr, p.Y - rr, rr * 2, rr * 2);
                     if (box.Contains(screenPt)) return it;
                 }
             }
-
             return null;
         }
 
-        private void SaveLayout()
+        private void Canvas_Paint(object sender, PaintEventArgs e)
         {
-            using (var sfd = new SaveFileDialog())
-            {
-                sfd.Title = "Save Layout";
-                sfd.Filter = "Layout (*.layout)|*.layout|All files (*.*)|*.*";
-                sfd.FileName = "layout.layout";
-                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+            var g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.Clear(Color.White);
 
-                try
+            DrawGrid(g);
+
+            if (_chkWifiHeatmap.Checked)
+                DrawWifiHeatmap(g);
+
+            for (int i = 0; i < _series.Count; i++)
+                DrawSeriesPath(g, _series[i]);
+
+            DrawLayout(g);
+            DrawNodes(g);
+
+            if (_chkBuilderMode.Checked && _creatingRect)
+                DrawPreviewRect(g);
+
+            DrawLegend(g);
+        }
+
+        private void DrawGrid(Graphics g)
+        {
+            using (var pen = new Pen(Color.FromArgb(235, 235, 235), 1))
+            {
+                int step = 50;
+                for (int x = 0; x < _canvas.Width; x += step) g.DrawLine(pen, x, 0, x, _canvas.Height);
+                for (int y = 0; y < _canvas.Height; y += step) g.DrawLine(pen, 0, y, _canvas.Width, y);
+            }
+        }
+
+        private void DrawNodes(Graphics g)
+        {
+            if (_nodes.Count == 0) return;
+
+            using (var nodeBrush = new SolidBrush(Color.Black))
+            using (var labelBrush = new SolidBrush(Color.FromArgb(60, 60, 60)))
+            using (var font = new Font("Segoe UI", 8f))
+            {
+                foreach (var kv in _nodes)
                 {
-                    using (var sw = new StreamWriter(sfd.FileName, false, Encoding.UTF8))
+                    var p = WorldToScreen(kv.Value);
+                    g.FillEllipse(nodeBrush, p.X - NodeRadiusPx, p.Y - NodeRadiusPx, NodeRadiusPx * 2, NodeRadiusPx * 2);
+                    if (_chkShowNodeLabels.Checked)
+                        g.DrawString(kv.Key, font, labelBrush, p.X + 6, p.Y + 3);
+                }
+            }
+        }
+
+        private void DrawLayout(Graphics g)
+        {
+            if (_layoutItems.Count == 0) return;
+
+            using (var font = new Font("Segoe UI", 10f))
+            using (var apFont = new Font("Segoe UI", 9f, FontStyle.Bold))
+            using (var rectLabelFont = new Font("Segoe UI", 8f, FontStyle.Regular))
+            {
+                int apIdx = 0;
+
+                foreach (var it in _layoutItems)
+                {
+                    if (it == null) continue;
+                    bool selected = ReferenceEquals(it, _selectedLayoutItem);
+
+                    if (it.Type == "rect")
                     {
-                        sw.WriteLine("LAYOUT2");
-                        foreach (var it in _layoutItems)
+                        var r = WorldRectToScreen(it.X, it.Y, it.W, it.H);
+                        Color fillCol = it.ColorArgb != 0 ? Color.FromArgb(it.ColorArgb) : _currentRectColor;
+
+                        using (var fill = new SolidBrush(fillCol))
+                            g.FillRectangle(fill, r);
+
+                        using (var pen = new Pen(selected ? Color.Red : Color.FromArgb(150, 60, 60, 60), selected ? 2.5f : 1.5f))
+                            g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
+
+                        if (!string.IsNullOrWhiteSpace(it.Text))
                         {
-                            string type = (it.Type ?? "").Trim().ToLowerInvariant();
-                            string id = EscapeText(it.Id ?? "");
-                            string x = it.X.ToString("R", CultureInfo.InvariantCulture);
-                            string y = it.Y.ToString("R", CultureInfo.InvariantCulture);
-                            string w = it.W.ToString("R", CultureInfo.InvariantCulture);
-                            string h = it.H.ToString("R", CultureInfo.InvariantCulture);
-                            string text = EscapeText(it.Text ?? "");
-                            string color = it.ColorArgb.ToString(CultureInfo.InvariantCulture);
-                            string en = it.Enabled ? "1" : "0";
-                            sw.WriteLine(type + "|" + id + "|" + x + "|" + y + "|" + w + "|" + h + "|" + text + "|" + color + "|" + en);
+                            using (var b = new SolidBrush(Color.FromArgb(220, 0, 0, 0)))
+                                g.DrawString(it.Text.Trim(), rectLabelFont, b, r.X + 4, r.Y + 4);
                         }
                     }
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(this, "Failed to save layout:\n\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    else if (it.Type == "text")
+                    {
+                        var p = WorldToScreen(new PointF(it.X, it.Y));
+                        string txt = it.Text ?? "";
+                        var size = g.MeasureString(txt, font);
+
+                        var bg = new RectangleF(p.X, p.Y, size.Width + 10, size.Height + 6);
+                        using (var fill = new SolidBrush(Color.FromArgb(90, 255, 255, 255)))
+                            g.FillRectangle(fill, bg);
+
+                        using (var pen = new Pen(selected ? Color.Red : Color.FromArgb(140, 0, 0, 0), selected ? 2f : 1f))
+                            g.DrawRectangle(pen, bg.X, bg.Y, bg.Width, bg.Height);
+
+                        using (var brush = new SolidBrush(Color.Black))
+                            g.DrawString(txt, font, brush, p.X + 5, p.Y + 3);
+                    }
+                    else if (it.Type == "ap")
+                    {
+                        var p = WorldToScreen(new PointF(it.X, it.Y));
+                        float r = 8f;
+
+                        Color onCol = GetNiceApColor(apIdx++);
+                        Color col = it.Enabled ? onCol : Color.FromArgb(160, 130, 130, 130);
+
+                        using (var b = new SolidBrush(col))
+                            g.FillEllipse(b, p.X - r, p.Y - r, r * 2, r * 2);
+
+                        using (var pen = new Pen(selected ? Color.Red : Color.FromArgb(180, 40, 40, 40), selected ? 2.2f : 1.2f))
+                            g.DrawEllipse(pen, p.X - r, p.Y - r, r * 2, r * 2);
+
+                        string name = string.IsNullOrWhiteSpace(it.Text) ? "AP" : it.Text.Trim();
+                        using (var tb = new SolidBrush(Color.Black))
+                            g.DrawString(name, apFont, tb, p.X + 10, p.Y - 10);
+                    }
                 }
             }
         }
 
-        private void LoadLayout()
+        private static Color GetNiceApColor(int idx)
         {
-            using (var ofd = new OpenFileDialog())
+            Color[] pal =
             {
-                ofd.Title = "Load Layout";
-                ofd.Filter = "Layout (*.layout)|*.layout|All files (*.*)|*.*";
-                ofd.Multiselect = false;
+                Color.FromArgb(0, 120, 215),
+                Color.FromArgb(0, 153, 188),
+                Color.FromArgb(16, 124, 16),
+                Color.FromArgb(255, 140, 0),
+                Color.FromArgb(136, 23, 152),
+                Color.FromArgb(232, 17, 35),
+                Color.FromArgb(95, 99, 104),
+            };
+            return pal[idx % pal.Length];
+        }
 
-                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+        private void DrawPreviewRect(Graphics g)
+        {
+            var a = _rectStartWorld;
+            var b = _rectCurrentWorld;
 
-                try
+            float x = Math.Min(a.X, b.X);
+            float y = Math.Min(a.Y, b.Y);
+            float w = Math.Abs(a.X - b.X);
+            float h = Math.Abs(a.Y - b.Y);
+
+            if (w < 0.0001f || h < 0.0001f) return;
+
+            var r = WorldRectToScreen(x, y, w, h);
+            using (var pen = new Pen(Color.FromArgb(220, 0, 120, 215), 2f) { DashStyle = DashStyle.Dash })
+                g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
+        }
+
+        private void DrawWifiHeatmap(Graphics g)
+        {
+            if (_nodes.Count == 0) return;
+
+            string selected = (_cmbAp.SelectedItem as string) ?? "ALL";
+            bool all = string.Equals(selected, "ALL", StringComparison.OrdinalIgnoreCase);
+
+            var perApPerNode = new Dictionary<string, Dictionary<string, SigAgg>>(StringComparer.OrdinalIgnoreCase);
+
+            for (int si = 0; si < _series.Count; si++)
+            {
+                var wifi = _series[si].Wifi;
+                if (wifi == null || wifi.Count == 0) continue;
+
+                for (int i = 0; i < wifi.Count; i++)
                 {
-                    var items = new List<LayoutItem>();
+                    var w = wifi[i];
+                    if (string.IsNullOrWhiteSpace(w.Mac)) continue;
+                    if (!all && !string.Equals(w.Mac, selected, StringComparison.OrdinalIgnoreCase)) continue;
 
-                    using (var sr = new StreamReader(ofd.FileName, Encoding.UTF8, true))
+                    if (!perApPerNode.TryGetValue(w.Mac, out var perNode))
                     {
-                        string header = sr.ReadLine();
-                        if (header == null) throw new Exception("Invalid layout file.");
-
-                        bool v2 = header.Trim() == "LAYOUT2";
-                        bool v1 = header.Trim() == "LAYOUT1";
-                        if (!v2 && !v1) throw new Exception("Invalid layout file header.");
-
-                        string line;
-                        while ((line = sr.ReadLine()) != null)
-                        {
-                            if (string.IsNullOrWhiteSpace(line)) continue;
-
-                            if (v2)
-                            {
-                                var parts = line.Split(new[] { '|' }, 9);
-                                if (parts.Length < 9) continue;
-
-                                string type = (parts[0] ?? "").Trim().ToLowerInvariant();
-                                string id = UnescapeText(parts[1] ?? "");
-                                float x = ParseFloatInvariant(parts[2]);
-                                float y = ParseFloatInvariant(parts[3]);
-                                float w = ParseFloatInvariant(parts[4]);
-                                float h = ParseFloatInvariant(parts[5]);
-                                string text = UnescapeText(parts[6] ?? "");
-                                int colorArgb = ParseIntInvariant(parts[7]);
-                                bool en = (parts[8] ?? "").Trim() == "1";
-
-                                if (type != "rect" && type != "text" && type != "ap") continue;
-
-                                if (string.IsNullOrWhiteSpace(id)) id = NewId();
-
-                                items.Add(new LayoutItem
-                                {
-                                    Type = type,
-                                    Id = id,
-                                    X = x,
-                                    Y = y,
-                                    W = w,
-                                    H = h,
-                                    Text = (type == "text" || type == "ap") ? text : (string.IsNullOrEmpty(text) ? null : text),
-                                    ColorArgb = colorArgb,
-                                    Enabled = en
-                                });
-                            }
-                            else
-                            {
-                                var parts = line.Split(new[] { '|' }, 6);
-                                if (parts.Length < 6) continue;
-
-                                string type = (parts[0] ?? "").Trim().ToLowerInvariant();
-                                float x = ParseFloatInvariant(parts[1]);
-                                float y = ParseFloatInvariant(parts[2]);
-                                float w = ParseFloatInvariant(parts[3]);
-                                float h = ParseFloatInvariant(parts[4]);
-                                string text = UnescapeText(parts[5]);
-
-                                if (type != "rect" && type != "text") continue;
-
-                                items.Add(new LayoutItem
-                                {
-                                    Type = type,
-                                    Id = NewId(),
-                                    X = x,
-                                    Y = y,
-                                    W = w,
-                                    H = h,
-                                    Text = (type == "text") ? text : null,
-                                    ColorArgb = 0,
-                                    Enabled = true
-                                });
-                            }
-                        }
+                        perNode = new Dictionary<string, SigAgg>(StringComparer.OrdinalIgnoreCase);
+                        perApPerNode[w.Mac] = perNode;
                     }
 
-                    _layoutItems.Clear();
-                    _layoutItems.AddRange(items);
-                    _selectedLayoutItem = null;
+                    if (!perNode.TryGetValue(w.NodeId, out var agg))
+                        agg = new SigAgg();
 
-                    RefreshApSideList();
-                    ComputeWorldBounds();
-                    UpdateBuilderButtons();
-                    Redraw();
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show(this, "Failed to load layout:\n\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    agg.Sum += w.Signal;
+                    agg.Count += 1;
+                    perNode[w.NodeId] = agg;
                 }
             }
-        }
 
-        private static int ParseIntInvariant(string s)
-        {
-            s = (s ?? "").Trim();
-            if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)) return v;
-            if (int.TryParse(s, NumberStyles.Integer, CultureInfo.CurrentCulture, out v)) return v;
-            return 0;
-        }
+            if (perApPerNode.Count == 0) return;
 
-        private static string EscapeText(string s)
-        {
-            if (s == null) return "";
-            return s.Replace("\\", "\\\\")
-                    .Replace("\r", "\\r")
-                    .Replace("\n", "\\n")
-                    .Replace("\t", "\\t")
-                    .Replace("|", "\\p");
-        }
+            int radius = 30;
 
-        private static string UnescapeText(string s)
-        {
-            if (s == null) return "";
-            var sb = new StringBuilder();
-            for (int i = 0; i < s.Length; i++)
+            foreach (var kvAp in perApPerNode)
             {
-                char c = s[i];
-                if (c == '\\' && i + 1 < s.Length)
+                foreach (var kvNode in kvAp.Value)
                 {
-                    char n = s[i + 1];
-                    if (n == '\\') { sb.Append('\\'); i++; continue; }
-                    if (n == 'r') { sb.Append('\r'); i++; continue; }
-                    if (n == 'n') { sb.Append('\n'); i++; continue; }
-                    if (n == 't') { sb.Append('\t'); i++; continue; }
-                    if (n == 'p') { sb.Append('|'); i++; continue; }
+                    if (!_nodes.TryGetValue(kvNode.Key, out var xy)) continue;
+
+                    float avg = (kvNode.Value.Count <= 0) ? 0f : (float)kvNode.Value.Sum / kvNode.Value.Count;
+                    int sig = (int)Math.Round(avg);
+                    if (sig < 0) sig = 0;
+                    if (sig > 100) sig = 100;
+
+                    int alpha = 60 + (int)Math.Round(sig * 1.4);
+                    if (alpha < 60) alpha = 60;
+                    if (alpha > 210) alpha = 210;
+
+                    var col = SignalToColor(sig, alpha);
+                    var p = WorldToScreen(xy);
+
+                    using (var b = new SolidBrush(col))
+                        g.FillEllipse(b, p.X - radius, p.Y - radius, radius * 2, radius * 2);
                 }
-                sb.Append(c);
             }
-            return sb.ToString();
         }
 
-        private static float ParseFloatInvariant(string s)
+        private static Color SignalToColor(int sig, int alpha)
         {
-            s = (s ?? "").Trim();
-            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out float v)) return v;
-            s = s.Replace(',', '.');
-            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v)) return v;
-            return 0f;
+            if (sig < 0) sig = 0;
+            if (sig > 100) sig = 100;
+
+            if (sig <= 50)
+            {
+                float t = sig / 50f;
+                int r = 255;
+                int g = (int)Math.Round(0 + 255 * t);
+                int b = 0;
+                return Color.FromArgb(alpha, r, g, b);
+            }
+            else
+            {
+                float t = (sig - 50) / 50f;
+                int r = (int)Math.Round(255 - 255 * t);
+                int g = 255;
+                int b = 0;
+                return Color.FromArgb(alpha, r, g, b);
+            }
         }
 
-        private static float Clamp(float v, float min, float max)
+        private void DrawSeriesPath(Graphics g, AgvSeries s)
         {
-            if (v < min) return min;
-            if (v > max) return max;
-            return v;
+            if (s.Points == null || s.Points.Count == 0) return;
+
+            if (s.Points.Count == 1)
+            {
+                var only = WorldToScreen(s.Points[0].XY);
+                using (var headBrush = new SolidBrush(s.Color))
+                    g.FillEllipse(headBrush, only.X - 6, only.Y - 6, 12, 12);
+                return;
+            }
+
+            var edgeCounts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 1; i < s.Points.Count; i++)
+            {
+                var key = EdgeKeyDirected(s.Points[i - 1].NodeId, s.Points[i].NodeId);
+                if (!edgeCounts.TryGetValue(key, out int c)) c = 0;
+                edgeCounts[key] = c + 1;
+            }
+
+            for (int i = 1; i < s.Points.Count; i++)
+            {
+                var a = s.Points[i - 1];
+                var b = s.Points[i];
+
+                var key = EdgeKeyDirected(a.NodeId, b.NodeId);
+                int c = edgeCounts[key];
+
+                Color col;
+                if (c <= 1) col = BlendWithWhite(s.Color, 0.65f);
+                else if (c == 2) col = BlendWithWhite(s.Color, 0.35f);
+                else col = s.Color;
+
+                float width = (c <= 1) ? 2.0f : (c == 2 ? 2.8f : 3.6f);
+
+                using (var pen = new Pen(col, width))
+                {
+                    var p1 = WorldToScreen(a.XY);
+                    var p2 = WorldToScreen(b.XY);
+                    g.DrawLine(pen, p1, p2);
+                }
+            }
+
+            var last = WorldToScreen(s.Points[s.Points.Count - 1].XY);
+            using (var headBrush = new SolidBrush(s.Color))
+                g.FillEllipse(headBrush, last.X - 6, last.Y - 6, 12, 12);
         }
+
+        private static string EdgeKeyDirected(string a, string b)
+        {
+            a = (a ?? "").Trim();
+            b = (b ?? "").Trim();
+            return a + "->" + b;
+        }
+
+        private static Color BlendWithWhite(Color baseColor, float t)
+        {
+            if (t < 0f) t = 0f;
+            if (t > 1f) t = 1f;
+
+            int r = (int)Math.Round(baseColor.R + (255 - baseColor.R) * t);
+            int g = (int)Math.Round(baseColor.G + (255 - baseColor.G) * t);
+            int b = (int)Math.Round(baseColor.B + (255 - baseColor.B) * t);
+
+            if (r < 0) r = 0; if (r > 255) r = 255;
+            if (g < 0) g = 0; if (g > 255) g = 255;
+            if (b < 0) b = 0; if (b > 255) b = 255;
+
+            return Color.FromArgb(r, g, b);
+        }
+
+        private void DrawLegend(Graphics g)
+        {
+            int x = 10;
+            int y = _top.Bottom + 10;
+
+            using (var font = new Font("Segoe UI", 9f))
+            {
+                foreach (var s in _series)
+                {
+                    using (var b = new SolidBrush(s.Color)) g.FillRectangle(b, x, y + 4, 14, 14);
+                    g.DrawRectangle(Pens.Black, x, y + 4, 14, 14);
+                    g.DrawString(s.Name + " (" + s.Points.Count + " pts)", font, Brushes.Black, x + 22, y + 2);
+                    y += 22;
+                }
+
+                if (_chkWifiHeatmap.Checked)
+                {
+                    string sel = (_cmbAp.SelectedItem as string) ?? "ALL";
+                    g.DrawString("WiFi heatmap: " + sel + " | APs: " + TotalApsInLogs() + " | Samples: " + TotalWifiSamples(), font, Brushes.Black, 10, y + 8);
+                }
+                else
+                {
+                    g.DrawString("WiFi samples: " + TotalWifiSamples() + " | APs: " + TotalApsInLogs(), font, Brushes.Black, 10, y + 8);
+                }
+
+                if (_chkBuilderMode.Checked)
+                    g.DrawString("Builder: " + _builderTool + " | Space+Left: pan | Middle: pan | Delete: remove | Ctrl+S: save", font, Brushes.Black, 10, y + 28);
+            }
+        }
+
+        private RectangleF WorldRectToScreen(float x, float y, float w, float h)
+        {
+            var p1 = WorldToScreen(new PointF(x, y));
+            var p2 = WorldToScreen(new PointF(x + w, y + h));
+            float left = Math.Min(p1.X, p2.X);
+            float top = Math.Min(p1.Y, p2.Y);
+            float right = Math.Max(p1.X, p2.X);
+            float bottom = Math.Max(p1.Y, p2.Y);
+            return new RectangleF(left, top, right - left, bottom - top);
+        }
+
+        private PointF WorldToScreen(PointF w) => WorldToScreen(w, _zoom, _panPx);
+
+        private PointF WorldToScreen(PointF w, float zoom, PointF panPx)
+        {
+            var rect = _worldBounds;
+
+            int W = Math.Max(1, _canvas.Width);
+            int H = Math.Max(1, _canvas.Height);
+
+            float usableW = Math.Max(1f, W - 2 * PaddingPx);
+            float usableH = Math.Max(1f, H - 2 * PaddingPx);
+
+            float sx = usableW / rect.Width;
+            float sy = usableH / rect.Height;
+            float baseS = Math.Min(sx, sy);
+            float s = baseS * zoom;
+
+            float drawW = rect.Width * s;
+            float drawH = rect.Height * s;
+
+            float ox = (W - drawW) / 2f;
+            float oy = (H - drawH) / 2f;
+
+            float x = ox + (w.X - rect.Left) * s + panPx.X;
+            float y = oy + (rect.Bottom - w.Y) * s + panPx.Y;
+
+            return new PointF(x, y);
+        }
+
+        private PointF ScreenToWorld(Point screenPt, float zoom, PointF panPx)
+        {
+            var rect = _worldBounds;
+
+            int W = Math.Max(1, _canvas.Width);
+            int H = Math.Max(1, _canvas.Height);
+
+            float usableW = Math.Max(1f, W - 2 * PaddingPx);
+            float usableH = Math.Max(1f, H - 2 * PaddingPx);
+
+            float sx = usableW / rect.Width;
+            float sy = usableH / rect.Height;
+            float baseS = Math.Min(sx, sy);
+            float s = baseS * zoom;
+
+            float drawW = rect.Width * s;
+            float drawH = rect.Height * s;
+
+            float ox = (W - drawW) / 2f;
+            float oy = (H - drawH) / 2f;
+
+            float x = (screenPt.X - ox - panPx.X) / s + rect.Left;
+            float y = rect.Bottom - ((screenPt.Y - oy - panPx.Y) / s);
+
+            return new PointF(x, y);
+        }
+
+        private void Redraw() => _canvas.Invalidate();
+
+        private static float Clamp(float v, float min, float max) => v < min ? min : (v > max ? max : v);
+
+        private static string NewId() => Guid.NewGuid().ToString("N");
 
         private void LoadNodesCsv()
         {
@@ -1165,14 +1482,346 @@ namespace AgvPathViewer
                     s.Points = ParseAgvLogCsv_NoDate(s.FilePath, _nodes, out wifi);
                     s.Wifi = wifi;
                 }
-                catch
-                {
-                }
+                catch { }
             }
 
             RefreshApList();
             ComputeWorldBounds();
             Redraw();
+        }
+
+        private void StartWatchers()
+        {
+            StopWatchers();
+
+            var dirs = _series
+                .Select(s => s.FilePath)
+                .Where(p => !string.IsNullOrWhiteSpace(p))
+                .Select(p => Path.GetDirectoryName(p))
+                .Where(d => !string.IsNullOrWhiteSpace(d))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var dir in dirs)
+            {
+                try
+                {
+                    var w = new FileSystemWatcher(dir);
+                    w.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName;
+                    w.Filter = "*.csv";
+                    w.Changed += WatcherEvent;
+                    w.Created += WatcherEvent;
+                    w.Renamed += WatcherEvent;
+                    w.EnableRaisingEvents = true;
+                    _watchers.Add(w);
+                }
+                catch { }
+            }
+        }
+
+        private void StopWatchers()
+        {
+            for (int i = 0; i < _watchers.Count; i++)
+            {
+                try
+                {
+                    _watchers[i].EnableRaisingEvents = false;
+                    _watchers[i].Dispose();
+                }
+                catch { }
+            }
+            _watchers.Clear();
+        }
+
+        private void WatcherEvent(object sender, FileSystemEventArgs e)
+        {
+            if (!_series.Any(s => StringComparer.OrdinalIgnoreCase.Equals(s.FilePath, e.FullPath)))
+                return;
+
+            _pendingRefresh = true;
+            _debounceTimer.Stop();
+            _debounceTimer.Start();
+        }
+
+        private void AssignColors()
+        {
+            var palette = new[]
+            {
+                Color.FromArgb(0, 120, 215),
+                Color.FromArgb(232, 17, 35),
+                Color.FromArgb(16, 124, 16),
+                Color.FromArgb(255, 140, 0),
+                Color.FromArgb(136, 23, 152),
+                Color.FromArgb(0, 153, 188),
+                Color.FromArgb(215, 186, 0),
+                Color.FromArgb(118, 118, 118),
+            };
+            for (int i = 0; i < _series.Count; i++)
+                _series[i].Color = palette[i % palette.Length];
+        }
+
+        private void RefreshApList()
+        {
+            var allMacs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var s in _series)
+            {
+                if (s.Wifi == null) continue;
+                foreach (var w in s.Wifi)
+                    if (!string.IsNullOrWhiteSpace(w.Mac))
+                        allMacs.Add(w.Mac.Trim());
+            }
+
+            var selected = _cmbAp.SelectedItem as string;
+            _cmbAp.Items.Clear();
+            _cmbAp.Items.Add("ALL");
+            foreach (var mac in allMacs.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
+                _cmbAp.Items.Add(mac);
+
+            if (selected != null && _cmbAp.Items.Contains(selected)) _cmbAp.SelectedItem = selected;
+            else _cmbAp.SelectedIndex = 0;
+        }
+
+        private int TotalWifiSamples() => _series.Sum(s => s.Wifi?.Count ?? 0);
+
+        private int TotalApsInLogs()
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            for (int i = 0; i < _series.Count; i++)
+            {
+                var w = _series[i].Wifi;
+                if (w == null) continue;
+                for (int j = 0; j < w.Count; j++)
+                {
+                    var m = (w[j].Mac ?? "").Trim();
+                    if (m.Length > 0) set.Add(m);
+                }
+            }
+            return set.Count;
+        }
+
+        private void ComputeWorldBounds()
+        {
+            var pts = new List<PointF>();
+            pts.AddRange(_nodes.Values);
+            foreach (var s in _series) pts.AddRange(s.Points.Select(p => p.XY));
+            foreach (var it in _layoutItems)
+            {
+                if (it == null) continue;
+                if (it.Type == "rect")
+                {
+                    pts.Add(new PointF(it.X, it.Y));
+                    pts.Add(new PointF(it.X + it.W, it.Y + it.H));
+                }
+                else
+                {
+                    pts.Add(new PointF(it.X, it.Y));
+                }
+            }
+
+            if (pts.Count == 0)
+            {
+                _worldBounds = new RectangleF(0, 0, 1, 1);
+                return;
+            }
+
+            float minX = pts.Min(p => p.X);
+            float maxX = pts.Max(p => p.X);
+            float minY = pts.Min(p => p.Y);
+            float maxY = pts.Max(p => p.Y);
+
+            minX -= PaddingWorld;
+            minY -= PaddingWorld;
+            maxX += PaddingWorld;
+            maxY += PaddingWorld;
+
+            float w = Math.Max(1e-3f, maxX - minX);
+            float h = Math.Max(1e-3f, maxY - minY);
+
+            _worldBounds = new RectangleF(minX, minY, w, h);
+        }
+
+        private void SaveLayout()
+        {
+            using (var sfd = new SaveFileDialog())
+            {
+                sfd.Title = "Save Layout";
+                sfd.Filter = "Layout (*.layout)|*.layout|All files (*.*)|*.*";
+                sfd.FileName = "layout.layout";
+                if (sfd.ShowDialog(this) != DialogResult.OK) return;
+
+                try
+                {
+                    using (var sw = new StreamWriter(sfd.FileName, false, Encoding.UTF8))
+                    {
+                        sw.WriteLine("LAYOUT2");
+                        foreach (var it in _layoutItems)
+                        {
+                            string type = (it.Type ?? "").Trim().ToLowerInvariant();
+                            string id = EscapeText(it.Id ?? "");
+                            string x = it.X.ToString("R", CultureInfo.InvariantCulture);
+                            string y = it.Y.ToString("R", CultureInfo.InvariantCulture);
+                            string w = it.W.ToString("R", CultureInfo.InvariantCulture);
+                            string h = it.H.ToString("R", CultureInfo.InvariantCulture);
+                            string text = EscapeText(it.Text ?? "");
+                            string color = it.ColorArgb.ToString(CultureInfo.InvariantCulture);
+                            string en = it.Enabled ? "1" : "0";
+                            sw.WriteLine(type + "|" + id + "|" + x + "|" + y + "|" + w + "|" + h + "|" + text + "|" + color + "|" + en);
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Failed to save layout:\n\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private void LoadLayout()
+        {
+            using (var ofd = new OpenFileDialog())
+            {
+                ofd.Title = "Load Layout";
+                ofd.Filter = "Layout (*.layout)|*.layout|All files (*.*)|*.*";
+                ofd.Multiselect = false;
+                if (ofd.ShowDialog(this) != DialogResult.OK) return;
+
+                try
+                {
+                    var items = new List<LayoutItem>();
+
+                    using (var sr = new StreamReader(ofd.FileName, Encoding.UTF8, true))
+                    {
+                        string header = sr.ReadLine();
+                        if (header == null) throw new Exception("Invalid layout file.");
+                        bool v2 = header.Trim() == "LAYOUT2";
+                        bool v1 = header.Trim() == "LAYOUT1";
+                        if (!v2 && !v1) throw new Exception("Invalid layout file header.");
+
+                        string line;
+                        while ((line = sr.ReadLine()) != null)
+                        {
+                            if (string.IsNullOrWhiteSpace(line)) continue;
+
+                            if (v2)
+                            {
+                                var parts = line.Split(new[] { '|' }, 9);
+                                if (parts.Length < 9) continue;
+
+                                string type = (parts[0] ?? "").Trim().ToLowerInvariant();
+                                string id = UnescapeText(parts[1] ?? "");
+                                float x = ParseFloatInvariant(parts[2]);
+                                float y = ParseFloatInvariant(parts[3]);
+                                float w = ParseFloatInvariant(parts[4]);
+                                float h = ParseFloatInvariant(parts[5]);
+                                string text = UnescapeText(parts[6] ?? "");
+                                int colorArgb = ParseIntInvariant(parts[7]);
+                                bool en = (parts[8] ?? "").Trim() == "1";
+
+                                if (type != "rect" && type != "text" && type != "ap") continue;
+                                if (string.IsNullOrWhiteSpace(id)) id = NewId();
+
+                                items.Add(new LayoutItem
+                                {
+                                    Type = type,
+                                    Id = id,
+                                    X = x,
+                                    Y = y,
+                                    W = w,
+                                    H = h,
+                                    Text = string.IsNullOrWhiteSpace(text) ? null : text,
+                                    ColorArgb = colorArgb,
+                                    Enabled = en
+                                });
+                            }
+                            else
+                            {
+                                var parts = line.Split(new[] { '|' }, 6);
+                                if (parts.Length < 6) continue;
+
+                                string type = (parts[0] ?? "").Trim().ToLowerInvariant();
+                                float x = ParseFloatInvariant(parts[1]);
+                                float y = ParseFloatInvariant(parts[2]);
+                                float w = ParseFloatInvariant(parts[3]);
+                                float h = ParseFloatInvariant(parts[4]);
+                                string text = UnescapeText(parts[5]);
+
+                                if (type != "rect" && type != "text") continue;
+
+                                items.Add(new LayoutItem
+                                {
+                                    Type = type,
+                                    Id = NewId(),
+                                    X = x,
+                                    Y = y,
+                                    W = w,
+                                    H = h,
+                                    Text = (type == "text") ? text : "Rect",
+                                    ColorArgb = 0,
+                                    Enabled = true
+                                });
+                            }
+                        }
+                    }
+
+                    _layoutItems.Clear();
+                    _layoutItems.AddRange(items);
+                    _selectedLayoutItem = null;
+
+                    RefreshApSideList();
+                    RefreshRectSideList();
+                    ComputeWorldBounds();
+                    UpdateUiStates();
+                    Redraw();
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Failed to load layout:\n\n" + ex.Message, "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+            }
+        }
+
+        private static int ParseIntInvariant(string s)
+        {
+            s = (s ?? "").Trim();
+            if (int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out int v)) return v;
+            if (int.TryParse(s, NumberStyles.Integer, CultureInfo.CurrentCulture, out v)) return v;
+            return 0;
+        }
+
+        private static string EscapeText(string s)
+        {
+            if (s == null) return "";
+            return s.Replace("\\", "\\\\").Replace("\r", "\\r").Replace("\n", "\\n").Replace("\t", "\\t").Replace("|", "\\p");
+        }
+
+        private static string UnescapeText(string s)
+        {
+            if (s == null) return "";
+            var sb = new StringBuilder();
+            for (int i = 0; i < s.Length; i++)
+            {
+                char c = s[i];
+                if (c == '\\' && i + 1 < s.Length)
+                {
+                    char n = s[i + 1];
+                    if (n == '\\') { sb.Append('\\'); i++; continue; }
+                    if (n == 'r') { sb.Append('\r'); i++; continue; }
+                    if (n == 'n') { sb.Append('\n'); i++; continue; }
+                    if (n == 't') { sb.Append('\t'); i++; continue; }
+                    if (n == 'p') { sb.Append('|'); i++; continue; }
+                }
+                sb.Append(c);
+            }
+            return sb.ToString();
+        }
+
+        private static float ParseFloatInvariant(string s)
+        {
+            s = (s ?? "").Trim();
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out float v)) return v;
+            s = s.Replace(',', '.');
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out v)) return v;
+            return 0f;
         }
 
         private static char DetectDelimiter(string line)
@@ -1200,25 +1849,15 @@ namespace AgvPathViewer
 
                 if (c == '"')
                 {
-                    if (inQuotes && i + 1 < line.Length && line[i + 1] == '"')
-                    {
-                        sb.Append('"');
-                        i++;
-                    }
-                    else
-                    {
-                        inQuotes = !inQuotes;
-                    }
+                    if (inQuotes && i + 1 < line.Length && line[i + 1] == '"') { sb.Append('"'); i++; }
+                    else inQuotes = !inQuotes;
                 }
                 else if (c == delimiter && !inQuotes)
                 {
                     result.Add(sb.ToString());
                     sb.Clear();
                 }
-                else
-                {
-                    sb.Append(c);
-                }
+                else sb.Append(c);
             }
 
             result.Add(sb.ToString());
@@ -1237,9 +1876,7 @@ namespace AgvPathViewer
                 {
                     var n = names[j].ToLowerInvariant();
                     var nNorm = new string(n.Where(ch => ch != ' ' && ch != '_' && ch != '-').ToArray());
-
-                    if (h == n || hNorm == nNorm)
-                        return i;
+                    if (h == n || hNorm == nNorm) return i;
                 }
             }
             return -1;
@@ -1279,6 +1916,16 @@ namespace AgvPathViewer
 
             if (dict.Count == 0) throw new Exception("No nodes parsed from nodes CSV.");
             return dict;
+        }
+
+        private static float ParseFloat(string s)
+        {
+            s = (s ?? "").Trim().Trim('"').Trim();
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out float f)) return f;
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.CurrentCulture, out f)) return f;
+            s = s.Replace(',', '.');
+            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out f)) return f;
+            throw new Exception("Could not parse float: " + s);
         }
 
         private static bool TryParseSignal0to100(string raw, out int sig)
@@ -1380,416 +2027,6 @@ namespace AgvPathViewer
             return compressed;
         }
 
-        private static float ParseFloat(string s)
-        {
-            s = (s ?? "").Trim().Trim('"').Trim();
-            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out float f)) return f;
-            if (float.TryParse(s, NumberStyles.Float, CultureInfo.CurrentCulture, out f)) return f;
-            s = s.Replace(',', '.');
-            if (float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out f)) return f;
-            throw new Exception("Could not parse float: " + s);
-        }
-
-        private void StartWatchers()
-        {
-            StopWatchers();
-
-            var dirs = _series
-                .Select(s => s.FilePath)
-                .Where(p => !string.IsNullOrWhiteSpace(p))
-                .Select(p => Path.GetDirectoryName(p))
-                .Where(d => !string.IsNullOrWhiteSpace(d))
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            foreach (var dir in dirs)
-            {
-                try
-                {
-                    var w = new FileSystemWatcher(dir);
-                    w.NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.FileName;
-                    w.Filter = "*.csv";
-                    w.Changed += WatcherEvent;
-                    w.Created += WatcherEvent;
-                    w.Renamed += WatcherEvent;
-                    w.EnableRaisingEvents = true;
-                    _watchers.Add(w);
-                }
-                catch
-                {
-                }
-            }
-        }
-
-        private void StopWatchers()
-        {
-            for (int i = 0; i < _watchers.Count; i++)
-            {
-                try
-                {
-                    _watchers[i].EnableRaisingEvents = false;
-                    _watchers[i].Dispose();
-                }
-                catch
-                {
-                }
-            }
-            _watchers.Clear();
-        }
-
-        private void WatcherEvent(object sender, FileSystemEventArgs e)
-        {
-            if (!_series.Any(s => StringComparer.OrdinalIgnoreCase.Equals(s.FilePath, e.FullPath)))
-                return;
-
-            _pendingRefresh = true;
-            _debounceTimer.Stop();
-            _debounceTimer.Start();
-        }
-
-        private void ComputeWorldBounds()
-        {
-            var pts = new List<PointF>();
-            pts.AddRange(_nodes.Values);
-            foreach (var s in _series) pts.AddRange(s.Points.Select(p => p.XY));
-            foreach (var it in _layoutItems)
-            {
-                if (it == null) continue;
-                if (string.Equals(it.Type, "rect", StringComparison.OrdinalIgnoreCase))
-                {
-                    pts.Add(new PointF(it.X, it.Y));
-                    pts.Add(new PointF(it.X + it.W, it.Y + it.H));
-                }
-                else
-                {
-                    pts.Add(new PointF(it.X, it.Y));
-                }
-            }
-
-            if (pts.Count == 0)
-            {
-                _worldBounds = new RectangleF(0, 0, 1, 1);
-                return;
-            }
-
-            float minX = pts.Min(p => p.X);
-            float maxX = pts.Max(p => p.X);
-            float minY = pts.Min(p => p.Y);
-            float maxY = pts.Max(p => p.Y);
-
-            minX -= PaddingWorld;
-            minY -= PaddingWorld;
-            maxX += PaddingWorld;
-            maxY += PaddingWorld;
-
-            float w = Math.Max(1e-3f, maxX - minX);
-            float h = Math.Max(1e-3f, maxY - minY);
-
-            _worldBounds = new RectangleF(minX, minY, w, h);
-        }
-
-        private void AssignColors()
-        {
-            var palette = new[]
-            {
-                Color.FromArgb(0, 120, 215),
-                Color.FromArgb(232, 17, 35),
-                Color.FromArgb(16, 124, 16),
-                Color.FromArgb(255, 140, 0),
-                Color.FromArgb(136, 23, 152),
-                Color.FromArgb(0, 153, 188),
-                Color.FromArgb(215, 186, 0),
-                Color.FromArgb(118, 118, 118),
-            };
-
-            for (int i = 0; i < _series.Count; i++)
-                _series[i].Color = palette[i % palette.Length];
-        }
-
-        private void RefreshApList()
-        {
-            var allMacs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var s in _series)
-            {
-                if (s.Wifi == null) continue;
-                foreach (var w in s.Wifi)
-                    if (!string.IsNullOrWhiteSpace(w.Mac))
-                        allMacs.Add(w.Mac.Trim());
-            }
-
-            var selected = _cmbAp.SelectedItem as string;
-
-            _cmbAp.Items.Clear();
-            _cmbAp.Items.Add("ALL");
-            foreach (var mac in allMacs.OrderBy(x => x, StringComparer.OrdinalIgnoreCase))
-                _cmbAp.Items.Add(mac);
-
-            if (selected != null && _cmbAp.Items.Contains(selected))
-                _cmbAp.SelectedItem = selected;
-            else
-                _cmbAp.SelectedIndex = 0;
-        }
-
-        private int TotalWifiSamples()
-        {
-            int n = 0;
-            for (int i = 0; i < _series.Count; i++)
-                if (_series[i].Wifi != null) n += _series[i].Wifi.Count;
-            return n;
-        }
-
-        private int TotalApsInLogs()
-        {
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < _series.Count; i++)
-            {
-                var w = _series[i].Wifi;
-                if (w == null) continue;
-                for (int j = 0; j < w.Count; j++)
-                {
-                    var m = (w[j].Mac ?? "").Trim();
-                    if (m.Length > 0) set.Add(m);
-                }
-            }
-            return set.Count;
-        }
-
-        private void Canvas_Paint(object sender, PaintEventArgs e)
-        {
-            var g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.Clear(Color.White);
-
-            DrawGrid(g);
-
-            if (_chkWifiHeatmap.Checked)
-                DrawWifiHeatmap(g);
-
-            for (int i = 0; i < _series.Count; i++)
-                DrawSeriesPath(g, _series[i]);
-
-            DrawLayout(g);
-            DrawNodes(g);
-            if (_chkBuilderMode.Checked && _creatingRect) DrawPreviewRect(g);
-            DrawLegend(g);
-        }
-
-        private void DrawGrid(Graphics g)
-        {
-            using (var pen = new Pen(Color.FromArgb(235, 235, 235), 1))
-            {
-                int step = 50;
-                for (int x = 0; x < _canvas.Width; x += step)
-                    g.DrawLine(pen, x, 0, x, _canvas.Height);
-
-                for (int y = 0; y < _canvas.Height; y += step)
-                    g.DrawLine(pen, 0, y, _canvas.Width, y);
-            }
-        }
-
-        private void DrawWifiHeatmap(Graphics g)
-        {
-            if (_nodes.Count == 0) return;
-
-            string selected = (_cmbAp.SelectedItem as string) ?? "ALL";
-            bool all = string.Equals(selected, "ALL", StringComparison.OrdinalIgnoreCase);
-
-            var perApPerNode = new Dictionary<string, Dictionary<string, SigAgg>>(StringComparer.OrdinalIgnoreCase);
-
-            for (int si = 0; si < _series.Count; si++)
-            {
-                var wifi = _series[si].Wifi;
-                if (wifi == null || wifi.Count == 0) continue;
-
-                for (int i = 0; i < wifi.Count; i++)
-                {
-                    var w = wifi[i];
-                    if (string.IsNullOrWhiteSpace(w.Mac)) continue;
-                    if (!all && !string.Equals(w.Mac, selected, StringComparison.OrdinalIgnoreCase)) continue;
-
-                    if (!perApPerNode.TryGetValue(w.Mac, out var perNode))
-                    {
-                        perNode = new Dictionary<string, SigAgg>(StringComparer.OrdinalIgnoreCase);
-                        perApPerNode[w.Mac] = perNode;
-                    }
-
-                    if (!perNode.TryGetValue(w.NodeId, out var agg))
-                        agg = new SigAgg();
-
-                    agg.Sum += w.Signal;
-                    agg.Count += 1;
-                    perNode[w.NodeId] = agg;
-                }
-            }
-
-            if (perApPerNode.Count == 0) return;
-
-            int radius = 30;
-
-            foreach (var kvAp in perApPerNode)
-            {
-                foreach (var kvNode in kvAp.Value)
-                {
-                    if (!_nodes.TryGetValue(kvNode.Key, out var xy)) continue;
-
-                    float avg = (kvNode.Value.Count <= 0) ? 0f : (float)kvNode.Value.Sum / kvNode.Value.Count;
-                    int sig = (int)Math.Round(avg);
-                    if (sig < 0) sig = 0;
-                    if (sig > 100) sig = 100;
-
-                    int alpha = 60 + (int)Math.Round(sig * 1.4);
-                    if (alpha < 60) alpha = 60;
-                    if (alpha > 210) alpha = 210;
-
-                    var col = SignalToColor(sig, alpha);
-                    var p = WorldToScreen(xy);
-
-                    using (var b = new SolidBrush(col))
-                        g.FillEllipse(b, p.X - radius, p.Y - radius, radius * 2, radius * 2);
-                }
-            }
-        }
-
-        private static Color SignalToColor(int sig, int alpha)
-        {
-            if (sig < 0) sig = 0;
-            if (sig > 100) sig = 100;
-
-            if (sig <= 50)
-            {
-                float t = sig / 50f;
-                int r = 255;
-                int g = (int)Math.Round(0 + 255 * t);
-                int b = 0;
-                return Color.FromArgb(alpha, r, g, b);
-            }
-            else
-            {
-                float t = (sig - 50) / 50f;
-                int r = (int)Math.Round(255 - 255 * t);
-                int g = 255;
-                int b = 0;
-                return Color.FromArgb(alpha, r, g, b);
-            }
-        }
-
-        private void DrawNodes(Graphics g)
-        {
-            if (_nodes.Count == 0) return;
-
-            using (var nodeBrush = new SolidBrush(Color.Black))
-            using (var labelBrush = new SolidBrush(Color.FromArgb(60, 60, 60)))
-            using (var font = new Font("Segoe UI", 8f))
-            {
-                foreach (var kv in _nodes)
-                {
-                    var p = WorldToScreen(kv.Value);
-                    g.FillEllipse(nodeBrush, p.X - NodeRadiusPx, p.Y - NodeRadiusPx, NodeRadiusPx * 2, NodeRadiusPx * 2);
-
-                    if (_chkShowNodeLabels.Checked)
-                        g.DrawString(kv.Key, font, labelBrush, p.X + 6, p.Y + 3);
-                }
-            }
-        }
-
-        private void DrawLayout(Graphics g)
-        {
-            if (_layoutItems.Count == 0) return;
-
-            using (var font = new Font("Segoe UI", 10f))
-            using (var apFont = new Font("Segoe UI", 9f, FontStyle.Bold))
-            {
-                int apIndex = 0;
-
-                foreach (var it in _layoutItems)
-                {
-                    if (it == null) continue;
-
-                    bool selected = ReferenceEquals(it, _selectedLayoutItem);
-
-                    if (string.Equals(it.Type, "rect", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var r = WorldRectToScreen(it.X, it.Y, it.W, it.H);
-
-                        int argb = it.ColorArgb != 0 ? it.ColorArgb : _currentRectColor.ToArgb();
-                        Color fillCol = Color.FromArgb(argb);
-
-                        using (var fill = new SolidBrush(fillCol))
-                            g.FillRectangle(fill, r);
-
-                        using (var pen = new Pen(selected ? Color.Red : Color.FromArgb(150, 60, 60, 60), selected ? 2.5f : 1.5f))
-                            g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
-                    }
-                    else if (string.Equals(it.Type, "text", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var p = WorldToScreen(new PointF(it.X, it.Y));
-                        string txt = it.Text ?? "";
-                        var size = g.MeasureString(txt, font);
-
-                        var bg = new RectangleF(p.X, p.Y, size.Width + 10, size.Height + 6);
-                        using (var fill = new SolidBrush(Color.FromArgb(90, 255, 255, 255)))
-                            g.FillRectangle(fill, bg);
-
-                        using (var pen = new Pen(selected ? Color.Red : Color.FromArgb(140, 0, 0, 0), selected ? 2f : 1f))
-                            g.DrawRectangle(pen, bg.X, bg.Y, bg.Width, bg.Height);
-
-                        using (var brush = new SolidBrush(Color.Black))
-                            g.DrawString(txt, font, brush, p.X + 5, p.Y + 3);
-                    }
-                    else if (string.Equals(it.Type, "ap", StringComparison.OrdinalIgnoreCase))
-                    {
-                        var p = WorldToScreen(new PointF(it.X, it.Y));
-                        float r = 8f;
-
-                        Color onCol = GetNiceApColor(apIndex++);
-                        Color col = it.Enabled ? onCol : Color.FromArgb(160, 130, 130, 130);
-
-                        using (var b = new SolidBrush(col))
-                            g.FillEllipse(b, p.X - r, p.Y - r, r * 2, r * 2);
-
-                        using (var pen = new Pen(selected ? Color.Red : Color.FromArgb(180, 40, 40, 40), selected ? 2.2f : 1.2f))
-                            g.DrawEllipse(pen, p.X - r, p.Y - r, r * 2, r * 2);
-
-                        string name = string.IsNullOrWhiteSpace(it.Text) ? "AP" : it.Text.Trim();
-                        using (var tb = new SolidBrush(Color.Black))
-                            g.DrawString(name, apFont, tb, p.X + 10, p.Y - 10);
-                    }
-                }
-            }
-        }
-
-        private static Color GetNiceApColor(int idx)
-        {
-            Color[] pal =
-            {
-                Color.FromArgb(0, 120, 215),
-                Color.FromArgb(0, 153, 188),
-                Color.FromArgb(16, 124, 16),
-                Color.FromArgb(255, 140, 0),
-                Color.FromArgb(136, 23, 152),
-                Color.FromArgb(232, 17, 35),
-                Color.FromArgb(95, 99, 104),
-            };
-            return pal[idx % pal.Length];
-        }
-
-        private void DrawPreviewRect(Graphics g)
-        {
-            var a = _rectStartWorld;
-            var b = _rectCurrentWorld;
-
-            float x = Math.Min(a.X, b.X);
-            float y = Math.Min(a.Y, b.Y);
-            float w = Math.Abs(a.X - b.X);
-            float h = Math.Abs(a.Y - b.Y);
-
-            if (w < 0.0001f || h < 0.0001f) return;
-
-            var r = WorldRectToScreen(x, y, w, h);
-            using (var pen = new Pen(Color.FromArgb(220, 0, 120, 215), 2f) { DashStyle = DashStyle.Dash })
-                g.DrawRectangle(pen, r.X, r.Y, r.Width, r.Height);
-        }
-
         private void DrawSeriesPath(Graphics g, AgvSeries s)
         {
             if (s.Points == null || s.Points.Count == 0) return;
@@ -1818,12 +2055,8 @@ namespace AgvPathViewer
                 var key = EdgeKeyDirected(a.NodeId, b.NodeId);
                 int c = edgeCounts[key];
 
-                Color col;
-                if (c <= 1) col = BlendWithWhite(s.Color, 0.65f);
-                else if (c == 2) col = BlendWithWhite(s.Color, 0.35f);
-                else col = s.Color;
-
-                float width = (c <= 1) ? 2.0f : (c == 2 ? 2.8f : 3.6f);
+                Color col = c <= 1 ? BlendWithWhite(s.Color, 0.65f) : (c == 2 ? BlendWithWhite(s.Color, 0.35f) : s.Color);
+                float width = c <= 1 ? 2.0f : (c == 2 ? 2.8f : 3.6f);
 
                 using (var pen = new Pen(col, width))
                 {
@@ -1838,156 +2071,9 @@ namespace AgvPathViewer
                 g.FillEllipse(headBrush, last.X - 6, last.Y - 6, 12, 12);
         }
 
-        private static string EdgeKeyDirected(string a, string b)
-        {
-            a = (a ?? "").Trim();
-            b = (b ?? "").Trim();
-            return a + "->" + b;
-        }
-
-        private static Color BlendWithWhite(Color baseColor, float t)
-        {
-            if (t < 0f) t = 0f;
-            if (t > 1f) t = 1f;
-
-            int r = (int)Math.Round(baseColor.R + (255 - baseColor.R) * t);
-            int g = (int)Math.Round(baseColor.G + (255 - baseColor.G) * t);
-            int b = (int)Math.Round(baseColor.B + (255 - baseColor.B) * t);
-
-            if (r < 0) r = 0; if (r > 255) r = 255;
-            if (g < 0) g = 0; if (g > 255) g = 255;
-            if (b < 0) b = 0; if (b > 255) b = 255;
-
-            return Color.FromArgb(r, g, b);
-        }
-
-        private void DrawLegend(Graphics g)
-        {
-            int x = 10;
-            int y = _top.Bottom + 10;
-
-            using (var font = new Font("Segoe UI", 9f))
-            {
-                foreach (var s in _series)
-                {
-                    using (var b = new SolidBrush(s.Color))
-                        g.FillRectangle(b, x, y + 4, 14, 14);
-
-                    g.DrawRectangle(Pens.Black, x, y + 4, 14, 14);
-                    g.DrawString(s.Name + " (" + s.Points.Count + " pts)", font, Brushes.Black, x + 22, y + 2);
-                    y += 22;
-                }
-
-                if (_chkWifiHeatmap.Checked)
-                {
-                    string sel = (_cmbAp.SelectedItem as string) ?? "ALL";
-                    g.DrawString("WiFi heatmap: " + sel + " | APs: " + TotalApsInLogs() + " | Samples: " + TotalWifiSamples(), font, Brushes.Black, 10, y + 8);
-                }
-                else
-                {
-                    g.DrawString("WiFi samples: " + TotalWifiSamples() + " | APs: " + TotalApsInLogs(), font, Brushes.Black, 10, y + 8);
-                }
-
-                if (_chkBuilderMode.Checked)
-                {
-                    string tool = _builderTool.ToString();
-                    g.DrawString("Builder: " + tool + " | Space+Left: pan | Middle: pan | Delete: remove | Ctrl+S: save", font, Brushes.Black, 10, y + 28);
-                }
-            }
-        }
-
-        private RectangleF WorldRectToScreen(float x, float y, float w, float h)
-        {
-            var p1 = WorldToScreen(new PointF(x, y));
-            var p2 = WorldToScreen(new PointF(x + w, y + h));
-            float left = Math.Min(p1.X, p2.X);
-            float top = Math.Min(p1.Y, p2.Y);
-            float right = Math.Max(p1.X, p2.X);
-            float bottom = Math.Max(p1.Y, p2.Y);
-            return new RectangleF(left, top, right - left, bottom - top);
-        }
-
-        private PointF WorldToScreen(PointF w) => WorldToScreen(w, _zoom, _panPx);
-
-        private PointF WorldToScreen(PointF w, float zoom, PointF panPx)
-        {
-            var rect = _worldBounds;
-
-            int W = Math.Max(1, _canvas.Width);
-            int H = Math.Max(1, _canvas.Height);
-
-            float usableW = Math.Max(1f, W - 2 * PaddingPx);
-            float usableH = Math.Max(1f, H - 2 * PaddingPx);
-
-            float sx = usableW / rect.Width;
-            float sy = usableH / rect.Height;
-            float baseS = Math.Min(sx, sy);
-            float s = baseS * zoom;
-
-            float drawW = rect.Width * s;
-            float drawH = rect.Height * s;
-
-            float ox = (W - drawW) / 2f;
-            float oy = (H - drawH) / 2f;
-
-            float x = ox + (w.X - rect.Left) * s + panPx.X;
-            float y = oy + (rect.Bottom - w.Y) * s + panPx.Y;
-
-            return new PointF(x, y);
-        }
-
-        private PointF ScreenToWorld(Point screenPt, float zoom, PointF panPx)
-        {
-            var rect = _worldBounds;
-
-            int W = Math.Max(1, _canvas.Width);
-            int H = Math.Max(1, _canvas.Height);
-
-            float usableW = Math.Max(1f, W - 2 * PaddingPx);
-            float usableH = Math.Max(1f, H - 2 * PaddingPx);
-
-            float sx = usableW / rect.Width;
-            float sy = usableH / rect.Height;
-            float baseS = Math.Min(sx, sy);
-            float s = baseS * zoom;
-
-            float drawW = rect.Width * s;
-            float drawH = rect.Height * s;
-
-            float ox = (W - drawW) / 2f;
-            float oy = (H - drawH) / 2f;
-
-            float x = (screenPt.X - ox - panPx.X) / s + rect.Left;
-            float y = rect.Bottom - ((screenPt.Y - oy - panPx.Y) / s);
-
-            return new PointF(x, y);
-        }
-
-        private void Redraw() => _canvas.Invalidate();
-
-        private static string NewId() => Guid.NewGuid().ToString("N");
-
-        private sealed class AgvPoint
-        {
-            public int Step;
-            public string NodeId;
-            public PointF XY;
-        }
-
-        private sealed class WifiSample
-        {
-            public string Mac;
-            public int Signal;
-            public string NodeId;
-            public PointF XY;
-        }
-
-        private struct SigAgg
-        {
-            public int Sum;
-            public int Count;
-        }
-
+        private sealed class AgvPoint { public int Step; public string NodeId; public PointF XY; }
+        private sealed class WifiSample { public string Mac; public int Signal; public string NodeId; public PointF XY; }
+        private struct SigAgg { public int Sum; public int Count; }
         private sealed class AgvSeries
         {
             public string Name;
@@ -1996,7 +2082,6 @@ namespace AgvPathViewer
             public List<WifiSample> Wifi = new List<WifiSample>();
             public Color Color = Color.Blue;
         }
-
         private sealed class LayoutItem
         {
             public string Type;
@@ -2012,7 +2097,6 @@ namespace AgvPathViewer
 
         public static class InputBox
         {
-            public static string Show(IWin32Window owner, string title, string prompt) => Show(owner, title, prompt, "");
             public static string Show(IWin32Window owner, string title, string prompt, string initial)
             {
                 using (var f = new Form())
