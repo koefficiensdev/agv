@@ -1,0 +1,131 @@
+@echo off
+setlocal EnableExtensions EnableDelayedExpansion
+
+REM =========================================================
+REM BEÁLLÍTÁSOK
+REM =========================================================
+
+REM Az első és második pingelendő IP
+set "IP1=192.168.1.1"
+set "IP2=8.8.8.8"
+
+REM Melyik IP legyen a reconnect figyelés alapja?
+REM 1 = IP1
+REM 2 = IP2
+set "MONITOR_TARGET=1"
+
+REM Wi-Fi profil / SSID neve, amire vissza akar csatlakozni
+set "WIFI_NAME=SAJAT_WIFI_NEVE"
+
+REM Wi-Fi interfész neve (általában: Wi-Fi)
+set "WIFI_INTERFACE=Wi-Fi"
+
+REM Ping timeout ezredmásodpercben (minél kisebb, annál gyorsabb)
+set "PING_TIMEOUT_MS=300"
+
+REM Körök közti várakozás másodpercben
+set "LOOP_DELAY_S=1"
+
+REM Hány egymást követő sikertelen kör után próbáljon reconnectet
+REM 60 = kb. 60 másodperc, ha LOOP_DELAY_S=1
+set "FAIL_THRESHOLD=60"
+
+REM Log fájl neve
+set "LOGFILE=ping_log.txt"
+
+REM =========================================================
+REM INDULÁS
+REM =========================================================
+
+if "%MONITOR_TARGET%"=="1" (
+    set "MONITOR_IP=%IP1%"
+) else (
+    set "MONITOR_IP=%IP2%"
+)
+
+set /a FAIL_COUNT=0
+
+echo ========================================================= >> "%LOGFILE%"
+echo Script indult: %date% %time% >> "%LOGFILE%"
+echo IP1=%IP1%, IP2=%IP2%, Monitor=%MONITOR_IP% >> "%LOGFILE%"
+echo ========================================================= >> "%LOGFILE%"
+
+echo Figyelt IP: %MONITOR_IP%
+echo Log file: %LOGFILE%
+echo Nyomj Ctrl+C-t a leállításhoz.
+echo.
+
+:LOOP
+
+call :PingCheck "%IP1%" IP1_OK
+call :PingCheck "%IP2%" IP2_OK
+
+if "!IP1_OK!"=="0" (
+    call :Log "[HIBA] Nincs valasz: %IP1%"
+)
+
+if "!IP2_OK!"=="0" (
+    call :Log "[HIBA] Nincs valasz: %IP2%"
+)
+
+REM A monitorozott IP eredményének kiválasztása
+if "%MONITOR_TARGET%"=="1" (
+    set "MONITOR_OK=!IP1_OK!"
+) else (
+    set "MONITOR_OK=!IP2_OK!"
+)
+
+if "!MONITOR_OK!"=="0" (
+    set /a FAIL_COUNT+=1
+    echo [%date% %time%] Figyelt IP sikertelen. Fail count: !FAIL_COUNT!/%FAIL_THRESHOLD%
+) else (
+    if !FAIL_COUNT! GTR 0 (
+        call :Log "[INFO] A figyelt IP ujra elerheto: %MONITOR_IP% (fail count reset)"
+    )
+    set /a FAIL_COUNT=0
+)
+
+if !FAIL_COUNT! GEQ %FAIL_THRESHOLD% (
+    call :Log "[RECONNECT] %MONITOR_IP% nem valaszolt kb. %FAIL_THRESHOLD% masodpercig. Wi-Fi ujracsatlakozas indul."
+    call :ReconnectWifi
+    set /a FAIL_COUNT=0
+)
+
+timeout /t %LOOP_DELAY_S% /nobreak >nul
+goto :LOOP
+
+
+REM =========================================================
+REM FÜGGVÉNYEK
+REM =========================================================
+
+:PingCheck
+REM %1 = IP
+REM %2 = visszatérési változó neve
+ping -n 1 -w %PING_TIMEOUT_MS% %~1 | find "TTL=" >nul
+if errorlevel 1 (
+    set "%~2=0"
+) else (
+    set "%~2=1"
+)
+exit /b
+
+
+:ReconnectWifi
+call :Log "[RECONNECT] Wi-Fi lecsatlakozas..."
+netsh wlan disconnect interface="%WIFI_INTERFACE%" >nul 2>&1
+
+timeout /t 3 /nobreak >nul
+
+call :Log "[RECONNECT] Wi-Fi visszacsatlakozas: %WIFI_NAME%"
+netsh wlan connect name="%WIFI_NAME%" interface="%WIFI_INTERFACE%" >nul 2>&1
+
+timeout /t 10 /nobreak >nul
+
+call :Log "[RECONNECT] Reconnect parancs lefutott."
+exit /b
+
+
+:Log
+echo [%date% %time%] %~1>> "%LOGFILE%"
+exit /b
