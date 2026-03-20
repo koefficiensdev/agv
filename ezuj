@@ -1,0 +1,152 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Threading;
+
+class Program
+{
+    static string LogRoot = @"C:\Logs";
+    static int RefreshMs = 2000;
+
+    // Node -> WiFi PROFILE mapping
+    static List<NodeRule> Rules = new List<NodeRule>
+    {
+        new NodeRule(0,  "AGV_AP1"),
+        new NodeRule(50, "AGV_AP2"),
+    };
+
+    static string currentProfile = "";
+
+    static void Main()
+    {
+        Rules = Rules.OrderBy(r => r.FromNode).ToList();
+
+        while (true)
+        {
+            try
+            {
+                Run();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("Hiba: " + ex.Message);
+            }
+
+            Thread.Sleep(RefreshMs);
+        }
+    }
+
+    static void Run()
+    {
+        string todayFolder = Path.Combine(LogRoot, DateTime.Now.ToString("yyyy-MM-dd"));
+
+        if (!Directory.Exists(todayFolder))
+        {
+            Console.WriteLine("Nincs mai mappa");
+            return;
+        }
+
+        string latestFile = Directory.GetFiles(todayFolder, "*.csv")
+            .OrderByDescending(f =>
+            {
+                try { return File.GetLastWriteTime(f); }
+                catch { return DateTime.MinValue; }
+            })
+            .FirstOrDefault();
+
+        if (string.IsNullOrEmpty(latestFile))
+        {
+            Console.WriteLine("Nincs CSV");
+            return;
+        }
+
+        var lines = ReadAllLinesSafe(latestFile);
+
+        if (lines.Length < 2)
+            return;
+
+        string lastLine = lines.Last(l => !string.IsNullOrWhiteSpace(l));
+
+        var cols = lastLine.Split(',');
+
+        if (cols.Length < 4)
+            return;
+
+        int node;
+        if (!int.TryParse(cols[3], out node))
+            return;
+
+        var rule = GetRule(node);
+
+        Console.Clear();
+        Console.WriteLine("Node: " + node);
+        Console.WriteLine("Elvárt profile: " + rule.Profile);
+        Console.WriteLine("Aktuális profile: " + currentProfile);
+
+        if (currentProfile != rule.Profile)
+        {
+            Console.WriteLine(">>> VÁLTÁS: " + rule.Profile);
+            ConnectToProfile(rule.Profile);
+            currentProfile = rule.Profile;
+        }
+        else
+        {
+            Console.WriteLine("OK");
+        }
+    }
+
+    static NodeRule GetRule(int node)
+    {
+        NodeRule result = Rules[0];
+
+        foreach (var r in Rules)
+        {
+            if (node >= r.FromNode)
+                result = r;
+        }
+
+        return result;
+    }
+
+    static void ConnectToProfile(string profile)
+    {
+        ProcessStartInfo psi = new ProcessStartInfo
+        {
+            FileName = "netsh",
+            Arguments = $"wlan connect name=\"{profile}\"",
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        var process = Process.Start(psi);
+        process.WaitForExit();
+    }
+
+    static string[] ReadAllLinesSafe(string path)
+    {
+        using (var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+        using (var sr = new StreamReader(fs))
+        {
+            var list = new List<string>();
+            while (!sr.EndOfStream)
+                list.Add(sr.ReadLine());
+
+            return list.ToArray();
+        }
+    }
+}
+
+class NodeRule
+{
+    public int FromNode;
+    public string Profile;
+
+    public NodeRule(int fromNode, string profile)
+    {
+        FromNode = fromNode;
+        Profile = profile;
+    }
+}
