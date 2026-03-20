@@ -1,0 +1,47 @@
+using System;
+using System.IO;
+using System.Linq;
+
+class Program
+{
+    static void Main()
+    {
+        string logRoot = @"C:\Logs";
+        string todayFolder = Path.Combine(logRoot, DateTime.Now.ToString("yyyy-MM-dd"));
+
+        if (!Directory.Exists(todayFolder))
+        {
+            Console.WriteLine("Nincs mai mappa.");
+            return;
+        }
+
+        var latestFile = Directory.GetFiles(todayFolder, "*.csv")
+            .OrderByDescending(f => File.GetLastWriteTime(f))
+            .FirstOrDefault();
+
+        if (latestFile == null)
+        {
+            Console.WriteLine("Nincs CSV fájl.");
+            return;
+        }
+
+        var lines = File.ReadAllLines(latestFile);
+
+        if (lines.Length == 0)
+        {
+            Console.WriteLine("Üres fájl.");
+            return;
+        }
+
+        string lastLine = lines.Last(l => !string.IsNullOrWhiteSpace(l));
+        var cols = lastLine.Split(',');
+
+        if (cols.Length < 4)
+        {
+            Console.WriteLine("Nincs D oszlop.");
+            return;
+        }
+
+        Console.WriteLine(cols[3]); // D oszlop (node)
+    }
+}
