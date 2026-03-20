@@ -9,14 +9,39 @@ using System.Threading;
 
 class Program
 {
-    // ====== BEÁLLÍTÁSOK ======
-    static string LogRoot = @"C:\Logs";
-    static string Ssid = "YOUR_WIFI_SSID";
-    static string ProfileName = "YOUR_WINDOWS_WIFI_PROFILE";
-    static int RefreshMs = 3000;
-    static int ConnectCooldownMs = 10000;
+    // =========================
+    // BEÁLLÍTÁSOK
+    // =========================
 
-    // node >= FromNode -> ezen a BSSID-n legyen
+    static string LogRoot = @"C:\Logs";
+
+    // Ugyanaz az SSID minden AP-n
+    static string Ssid = "AGV_WIFI";
+
+    // A Windowsban már elmentett Wi-Fi profil neve
+    // Ezt a "netsh wlan show profiles" paranccsal tudod megnézni
+    static string ProfileName = "AGV_WIFI";
+
+    // Milyen gyakran nézze a logot
+    static int RefreshMs = 2000;
+
+    // Két váltási kísérlet között minimum ennyi idő teljen el
+    static int ConnectCooldownMs = 15000;
+
+    // Opcionális: zónaváltásnál előbb bontsa a kapcsolatot, aztán csatlakozzon
+    // Sokszor jobban rásegít a desired BSSID-re
+    static bool DisconnectBeforeConnect = true;
+
+    // Ha a CSV-ben nincs fejléc, akkor is működik:
+    // D oszlop = index 3
+    static int NodeColumnIndex = 3;
+
+    // Ha fejléc alapján akarod keresni a node oszlopot, add meg itt
+    // Ha nem kell, hagyd üresen
+    static string NodeHeaderName = "";
+
+    // ZÓNASZABÁLYOK:
+    // node >= FromNode  => ezen a BSSID-n kell lennie
     static List<NodeRule> Rules = new List<NodeRule>
     {
         new NodeRule(0,  "AA:BB:CC:DD:EE:01"),
@@ -24,13 +49,20 @@ class Program
         // new NodeRule(120, "AA:BB:CC:DD:EE:03"),
     };
 
-    static DateTime _lastConnectAttemptUtc = DateTime.MinValue;
+    // =========================
+    // BELSŐ ÁLLAPOT
+    // =========================
+
     static string _lastTargetBssid = "";
+    static int _lastNode = -1;
+    static DateTime _lastConnectAttemptUtc = DateTime.MinValue;
+    static string _lastConnectInfo = "Még nem történt váltás.";
 
     static void Main()
     {
+        Console.Title = "AGV Node -> BSSID Switcher";
+
         Rules = Rules.OrderBy(r => r.FromNode).ToList();
-        Console.Title = "AGV Node -> BSSID WiFi Switcher";
 
         while (true)
         {
@@ -41,7 +73,7 @@ class Program
             catch (Exception ex)
             {
                 Console.Clear();
-                Console.WriteLine("Hiba:");
+                Console.WriteLine("Váratlan hiba:");
                 Console.WriteLine(ex.ToString());
             }
 
@@ -52,132 +84,200 @@ class Program
     static void RunOnce()
     {
         string todayFolder = Path.Combine(LogRoot, DateTime.Now.ToString("yyyy-MM-dd"));
+
         if (!Directory.Exists(todayFolder))
         {
             Console.Clear();
-            Console.WriteLine("Nincs mai mappa: " + todayFolder);
+            Console.WriteLine("Nincs mai mappa:");
+            Console.WriteLine(todayFolder);
+            Console.WriteLine();
+            Console.WriteLine(_lastConnectInfo);
             return;
         }
 
-        string latestFile = Directory.GetFiles(todayFolder, "*.csv")
-            .OrderByDescending(f =>
-            {
-                try { return File.GetLastWriteTime(f); }
-                catch { return DateTime.MinValue; }
-            })
-            .FirstOrDefault();
+        string latestFile = GetLatestCsvFile(todayFolder);
 
         if (string.IsNullOrWhiteSpace(latestFile))
         {
             Console.Clear();
             Console.WriteLine("Nincs CSV a mai mappában.");
+            Console.WriteLine(todayFolder);
+            Console.WriteLine();
+            Console.WriteLine(_lastConnectInfo);
             return;
         }
 
         string[] lines = ReadAllLinesSafe(latestFile);
-        string lastLine = LastNonEmptyLine(lines);
-
-        if (string.IsNullOrWhiteSpace(lastLine))
+        if (lines == null || lines.Length == 0)
         {
             Console.Clear();
-            Console.WriteLine("A fájl üres: " + latestFile);
+            Console.WriteLine("Üres vagy nem olvasható CSV:");
+            Console.WriteLine(latestFile);
+            Console.WriteLine();
+            Console.WriteLine(_lastConnectInfo);
             return;
         }
 
-        char sep = DetectSeparator(lastLine);
-        string[] cols = lastLine.Split(sep);
+        string headerLine = FirstNonEmptyLine(lines);
+        string lastDataLine = LastNonEmptyLine(lines);
 
-        if (cols.Length < 4)
+        if (string.IsNullOrWhiteSpace(lastDataLine))
         {
             Console.Clear();
-            Console.WriteLine("Nincs D oszlop az utolsó sorban.");
-            Console.WriteLine(lastLine);
+            Console.WriteLine("Nincs adat a CSV-ben:");
+            Console.WriteLine(latestFile);
+            Console.WriteLine();
+            Console.WriteLine(_lastConnectInfo);
             return;
         }
+
+        char separator = DetectSeparator(!string.IsNullOrWhiteSpace(headerLine) ? headerLine : lastDataLine);
+
+        string[] headers = string.IsNullOrWhiteSpace(headerLine)
+            ? new string[0]
+            : SplitCsvLineSimple(headerLine, separator);
+
+        string[] values = SplitCsvLineSimple(lastDataLine, separator);
+
+        int nodeIndex = NodeColumnIndex;
+        if (!string.IsNullOrWhiteSpace(NodeHeaderName))
+        {
+            int found = FindHeaderIndex(headers, NodeHeaderName);
+            if (found >= 0)
+                nodeIndex = found;
+        }
+
+        string nodeText = GetColumn(values, nodeIndex);
 
         int node;
-        if (!TryParseIntLoose(cols[3], out node))
+        if (!TryParseIntLoose(nodeText, out node))
         {
             Console.Clear();
-            Console.WriteLine("Nem sikerült node-ot olvasni a D oszlopból:");
-            Console.WriteLine(cols[3]);
+            Console.WriteLine("Nem sikerült node-ot olvasni.");
+            Console.WriteLine("Fájl: " + latestFile);
+            Console.WriteLine("Utolsó sor: " + lastDataLine);
+            Console.WriteLine("Node mező: " + nodeText);
+            Console.WriteLine();
+            Console.WriteLine(_lastConnectInfo);
             return;
         }
 
-        NodeRule rule = GetRule(node);
+        NodeRule rule = GetRuleForNode(node);
         if (rule == null)
         {
             Console.Clear();
             Console.WriteLine("Nincs szabály erre a node-ra: " + node);
+            Console.WriteLine();
+            Console.WriteLine(_lastConnectInfo);
             return;
-        }
-
-        string currentBssid = "";
-        string currentSsid = "";
-        bool connected = false;
-
-        try
-        {
-            connected = WifiNative.TryGetCurrentConnection(out currentSsid, out currentBssid);
-        }
-        catch
-        {
-            connected = false;
         }
 
         string targetBssid = NormalizeMac(rule.TargetBssid);
-        bool alreadyOnTarget = connected && NormalizeMac(currentBssid) == targetBssid;
+
+        bool zoneChanged = string.IsNullOrWhiteSpace(_lastTargetBssid) || _lastTargetBssid != targetBssid;
+        bool cooldownActive = (DateTime.UtcNow - _lastConnectAttemptUtc).TotalMilliseconds < ConnectCooldownMs;
+
+        string currentBssidBestEffort = WifiNative.TryGetCurrentBssidBestEffort();
 
         Console.Clear();
-        Console.WriteLine("AGV Node -> BSSID WiFi Switcher");
-        Console.WriteLine("================================");
-        Console.WriteLine("Idő:            " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
-        Console.WriteLine("CSV:            " + Path.GetFileName(latestFile));
-        Console.WriteLine("Node:           " + node);
-        Console.WriteLine("SSID cél:       " + Ssid);
-        Console.WriteLine("Profile:        " + ProfileName);
-        Console.WriteLine("Cél BSSID:      " + targetBssid);
-        Console.WriteLine("Aktuális SSID:  " + (connected ? currentSsid : "(nincs / nem olvasható)"));
-        Console.WriteLine("Aktuális BSSID: " + (connected ? currentBssid : "(nincs / nem olvasható)"));
+        Console.WriteLine("AGV Node -> BSSID Switcher");
+        Console.WriteLine("==========================");
+        Console.WriteLine("Idő:                 " + DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"));
+        Console.WriteLine("Mai mappa:           " + todayFolder);
+        Console.WriteLine("Legfrissebb CSV:     " + Path.GetFileName(latestFile));
+        Console.WriteLine("Utolsó sor node:     " + node);
+        Console.WriteLine("Cél SSID:            " + Ssid);
+        Console.WriteLine("Windows profil:      " + ProfileName);
+        Console.WriteLine("Elvárt BSSID:        " + targetBssid);
+        Console.WriteLine("Aktuális BSSID*:     " + currentBssidBestEffort);
+        Console.WriteLine();
+        Console.WriteLine("* Ez csak best-effort kijelzés, a döntéshez nem használjuk.");
         Console.WriteLine();
 
-        if (alreadyOnTarget)
+        if (zoneChanged)
         {
-            Console.WriteLine("Állapot: OK - már a kívánt BSSID-n van.");
-            return;
+            if (cooldownActive)
+            {
+                Console.WriteLine("Zónaváltás kellene, de még cooldown aktív.");
+                Console.WriteLine(_lastConnectInfo);
+            }
+            else
+            {
+                string info;
+                bool ok = WifiNative.TryConnectToSpecificBssid(
+                    Ssid,
+                    ProfileName,
+                    targetBssid,
+                    DisconnectBeforeConnect,
+                    out info);
+
+                _lastConnectAttemptUtc = DateTime.UtcNow;
+
+                if (ok)
+                {
+                    _lastTargetBssid = targetBssid;
+                    _lastConnectInfo = "Váltás elküldve -> " + targetBssid + " | " + info;
+                    Console.WriteLine("VÁLTÁS ELKÜLDVE");
+                    Console.WriteLine(_lastConnectInfo);
+                }
+                else
+                {
+                    _lastConnectInfo = "Váltás hiba -> " + targetBssid + " | " + info;
+                    Console.WriteLine("VÁLTÁS HIBA");
+                    Console.WriteLine(_lastConnectInfo);
+                }
+            }
+        }
+        else
+        {
+            Console.WriteLine("Nincs zónaváltás. Marad a jelenlegi cél: " + _lastTargetBssid);
+            Console.WriteLine(_lastConnectInfo);
         }
 
-        bool cooldown = (DateTime.UtcNow - _lastConnectAttemptUtc).TotalMilliseconds < ConnectCooldownMs
-                        && _lastTargetBssid == targetBssid;
-
-        if (cooldown)
-        {
-            Console.WriteLine("Állapot: várakozás cooldown miatt.");
-            return;
-        }
-
-        Console.WriteLine("Állapot: váltás szükséges...");
-
-        string error;
-        bool ok = WifiNative.ConnectToSpecificBssid(Ssid, ProfileName, targetBssid, out error);
-
-        _lastConnectAttemptUtc = DateTime.UtcNow;
-        _lastTargetBssid = targetBssid;
-
-        Console.WriteLine(ok ? "Connect hívás elküldve." : "Connect hiba: " + error);
-    }
-
-    static NodeRule GetRule(int node)
-    {
-        NodeRule result = null;
+        _lastNode = node;
+        Console.WriteLine();
+        Console.WriteLine("Szabályok:");
         foreach (var r in Rules)
         {
-            if (node >= r.FromNode)
-                result = r;
+            Console.WriteLine("  node >= " + r.FromNode + "  ->  " + NormalizeMac(r.TargetBssid));
+        }
+    }
+
+    static NodeRule GetRuleForNode(int node)
+    {
+        NodeRule result = null;
+        for (int i = 0; i < Rules.Count; i++)
+        {
+            if (node >= Rules[i].FromNode)
+                result = Rules[i];
             else
                 break;
         }
         return result;
+    }
+
+    static string GetLatestCsvFile(string folder)
+    {
+        try
+        {
+            return Directory.GetFiles(folder, "*.csv")
+                .OrderByDescending(f =>
+                {
+                    try
+                    {
+                        return File.GetLastWriteTime(f);
+                    }
+                    catch
+                    {
+                        return DateTime.MinValue;
+                    }
+                })
+                .FirstOrDefault();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     static string[] ReadAllLinesSafe(string path)
@@ -187,9 +287,22 @@ class Program
         {
             var list = new List<string>();
             while (!sr.EndOfStream)
+            {
                 list.Add(sr.ReadLine());
+            }
             return list.ToArray();
         }
+    }
+
+    static string FirstNonEmptyLine(string[] lines)
+    {
+        if (lines == null) return null;
+        for (int i = 0; i < lines.Length; i++)
+        {
+            if (!string.IsNullOrWhiteSpace(lines[i]))
+                return lines[i];
+        }
+        return null;
     }
 
     static string LastNonEmptyLine(string[] lines)
@@ -205,14 +318,49 @@ class Program
 
     static char DetectSeparator(string line)
     {
+        if (string.IsNullOrEmpty(line))
+            return ',';
+
         int semis = line.Count(c => c == ';');
         int commas = line.Count(c => c == ',');
         return semis > commas ? ';' : ',';
     }
 
+    static string[] SplitCsvLineSimple(string line, char separator)
+    {
+        if (line == null)
+            return new string[0];
+
+        return line.Split(separator);
+    }
+
+    static int FindHeaderIndex(string[] headers, string headerName)
+    {
+        if (headers == null || string.IsNullOrWhiteSpace(headerName))
+            return -1;
+
+        for (int i = 0; i < headers.Length; i++)
+        {
+            string h = (headers[i] ?? "").Trim().Trim('"');
+            if (string.Equals(h, headerName, StringComparison.OrdinalIgnoreCase))
+                return i;
+        }
+
+        return -1;
+    }
+
+    static string GetColumn(string[] values, int index)
+    {
+        if (values == null || index < 0 || index >= values.Length)
+            return "";
+
+        return (values[index] ?? "").Trim().Trim('"');
+    }
+
     static bool TryParseIntLoose(string text, out int value)
     {
         value = 0;
+
         if (string.IsNullOrWhiteSpace(text))
             return false;
 
@@ -237,7 +385,9 @@ class Program
 
     static string NormalizeMac(string mac)
     {
-        if (string.IsNullOrWhiteSpace(mac)) return "";
+        if (string.IsNullOrWhiteSpace(mac))
+            return "";
+
         return mac.Trim().ToUpperInvariant().Replace("-", ":");
     }
 }
@@ -250,94 +400,61 @@ class NodeRule
     public NodeRule(int fromNode, string targetBssid)
     {
         FromNode = fromNode;
-        TargetBssid = targetBssid;
+        TargetBssid = targetBssid ?? "";
     }
 }
 
 static class WifiNative
 {
-    // ===== Public API =====
-
-    public static bool TryGetCurrentConnection(out string ssid, out string bssid)
+    public static bool TryConnectToSpecificBssid(
+        string ssid,
+        string profileName,
+        string targetBssid,
+        bool disconnectBeforeConnect,
+        out string info)
     {
-        ssid = "";
-        bssid = "";
+        info = "";
 
         IntPtr client = IntPtr.Zero;
         IntPtr ifListPtr = IntPtr.Zero;
-        IntPtr dataPtr = IntPtr.Zero;
-
-        try
-        {
-            uint negotiated;
-            Check(WlanOpenHandle(2, IntPtr.Zero, out negotiated, out client), "WlanOpenHandle");
-
-            Guid ifGuid = GetFirstInterfaceGuid(client, out ifListPtr);
-
-            WLAN_OPCODE_VALUE_TYPE opCode;
-            uint dataSize;
-            Check(WlanQueryInterface(client, ref ifGuid, WLAN_INTF_OPCODE.wlan_intf_opcode_current_connection,
-                IntPtr.Zero, out dataSize, out dataPtr, out opCode), "WlanQueryInterface(current_connection)");
-
-            WLAN_CONNECTION_ATTRIBUTES conn =
-                (WLAN_CONNECTION_ATTRIBUTES)Marshal.PtrToStructure(dataPtr, typeof(WLAN_CONNECTION_ATTRIBUTES));
-
-            ssid = Dot11SsidToString(conn.wlanAssociationAttributes.dot11Ssid);
-            bssid = MacToString(conn.wlanAssociationAttributes.dot11Bssid);
-            return true;
-        }
-        catch
-        {
-            return false;
-        }
-        finally
-        {
-            if (dataPtr != IntPtr.Zero) WlanFreeMemory(dataPtr);
-            if (ifListPtr != IntPtr.Zero) WlanFreeMemory(ifListPtr);
-            if (client != IntPtr.Zero) WlanCloseHandle(client, IntPtr.Zero);
-        }
-    }
-
-    public static bool ConnectToSpecificBssid(string ssid, string profileName, string targetBssid, out string error)
-    {
-        error = "";
-
-        IntPtr client = IntPtr.Zero;
-        IntPtr ifListPtr = IntPtr.Zero;
-        IntPtr bssListPtr = IntPtr.Zero;
-        IntPtr desiredBssidListPtr = IntPtr.Zero;
         IntPtr ssidPtr = IntPtr.Zero;
+        IntPtr desiredBssidListPtr = IntPtr.Zero;
 
         try
         {
-            uint negotiated;
-            Check(WlanOpenHandle(2, IntPtr.Zero, out negotiated, out client), "WlanOpenHandle");
+            uint negotiatedVersion;
+            Check(WlanOpenHandle(2, IntPtr.Zero, out negotiatedVersion, out client), "WlanOpenHandle");
 
             Guid ifGuid = GetFirstInterfaceGuid(client, out ifListPtr);
 
             DOT11_SSID ssidStruct = MakeSsid(ssid);
 
-            // Scan kérés
-            WlanScan(client, ref ifGuid, ref ssidStruct, IntPtr.Zero, IntPtr.Zero);
-            Thread.Sleep(1500);
-
-            // Megnézzük látszik-e a cél BSSID
-            Check(WlanGetNetworkBssList(client, ref ifGuid, ref ssidStruct,
-                DOT11_BSS_TYPE.dot11_BSS_type_infrastructure, false, IntPtr.Zero, out bssListPtr), "WlanGetNetworkBssList");
-
-            string normalizedTarget = NormalizeMac(targetBssid);
-            bool visible = BssListContains(bssListPtr, normalizedTarget);
-
-            if (!visible)
+            // Opcionális scan - ha elbukik, attól még mehetünk tovább
+            try
             {
-                error = "A cél BSSID nem látható jelenleg: " + normalizedTarget;
-                return false;
+                WlanScan(client, ref ifGuid, ref ssidStruct, IntPtr.Zero, IntPtr.Zero);
+                Thread.Sleep(1000);
+            }
+            catch
+            {
+            }
+
+            if (disconnectBeforeConnect)
+            {
+                try
+                {
+                    WlanDisconnect(client, ref ifGuid, IntPtr.Zero);
+                    Thread.Sleep(1000);
+                }
+                catch
+                {
+                }
             }
 
             ssidPtr = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(DOT11_SSID)));
             Marshal.StructureToPtr(ssidStruct, ssidPtr, false);
 
-            desiredBssidListPtr = AllocSingleBssidList(ParseMac(normalizedTarget));
+            desiredBssidListPtr = AllocSingleBssidList(ParseMac(targetBssid));
 
             WLAN_CONNECTION_PARAMETERS cp = new WLAN_CONNECTION_PARAMETERS();
             cp.wlanConnectionMode = WLAN_CONNECTION_MODE.wlan_connection_mode_profile;
@@ -348,57 +465,85 @@ static class WifiNative
             cp.dwFlags = 0;
 
             Check(WlanConnect(client, ref ifGuid, ref cp, IntPtr.Zero), "WlanConnect");
+
+            info = "Connect kérés elküldve a drivernek.";
             return true;
         }
         catch (Exception ex)
         {
-            error = ex.Message;
+            info = ex.Message;
             return false;
         }
         finally
         {
-            if (ssidPtr != IntPtr.Zero) Marshal.FreeHGlobal(ssidPtr);
             if (desiredBssidListPtr != IntPtr.Zero) Marshal.FreeHGlobal(desiredBssidListPtr);
-            if (bssListPtr != IntPtr.Zero) WlanFreeMemory(bssListPtr);
+            if (ssidPtr != IntPtr.Zero) Marshal.FreeHGlobal(ssidPtr);
             if (ifListPtr != IntPtr.Zero) WlanFreeMemory(ifListPtr);
             if (client != IntPtr.Zero) WlanCloseHandle(client, IntPtr.Zero);
         }
     }
 
-    // ===== Helpers =====
+    public static string TryGetCurrentBssidBestEffort()
+    {
+        IntPtr client = IntPtr.Zero;
+        IntPtr ifListPtr = IntPtr.Zero;
+        IntPtr dataPtr = IntPtr.Zero;
+
+        try
+        {
+            uint negotiatedVersion;
+            Check(WlanOpenHandle(2, IntPtr.Zero, out negotiatedVersion, out client), "WlanOpenHandle");
+
+            Guid ifGuid = GetFirstInterfaceGuid(client, out ifListPtr);
+
+            uint dataSize;
+            WLAN_OPCODE_VALUE_TYPE valueType;
+            Check(
+                WlanQueryInterface(
+                    client,
+                    ref ifGuid,
+                    WLAN_INTF_OPCODE.wlan_intf_opcode_current_connection,
+                    IntPtr.Zero,
+                    out dataSize,
+                    out dataPtr,
+                    out valueType),
+                "WlanQueryInterface");
+
+            WLAN_CONNECTION_ATTRIBUTES conn =
+                (WLAN_CONNECTION_ATTRIBUTES)Marshal.PtrToStructure(
+                    dataPtr,
+                    typeof(WLAN_CONNECTION_ATTRIBUTES));
+
+            return MacToString(conn.wlanAssociationAttributes.dot11Bssid);
+        }
+        catch
+        {
+            return "(nem elérhető)";
+        }
+        finally
+        {
+            if (dataPtr != IntPtr.Zero) WlanFreeMemory(dataPtr);
+            if (ifListPtr != IntPtr.Zero) WlanFreeMemory(ifListPtr);
+            if (client != IntPtr.Zero) WlanCloseHandle(client, IntPtr.Zero);
+        }
+    }
 
     static Guid GetFirstInterfaceGuid(IntPtr client, out IntPtr ifListPtr)
     {
         ifListPtr = IntPtr.Zero;
+
         Check(WlanEnumInterfaces(client, IntPtr.Zero, out ifListPtr), "WlanEnumInterfaces");
 
         int numberOfItems = Marshal.ReadInt32(ifListPtr, 0);
         if (numberOfItems < 1)
             throw new Exception("Nem található Wi-Fi interface.");
 
-        long listIterator = ifListPtr.ToInt64() + 8; // dwNumberOfItems + dwIndex
+        long current = ifListPtr.ToInt64() + 8; // dwNumberOfItems + dwIndex
         WLAN_INTERFACE_INFO info = (WLAN_INTERFACE_INFO)Marshal.PtrToStructure(
-            new IntPtr(listIterator), typeof(WLAN_INTERFACE_INFO));
+            new IntPtr(current),
+            typeof(WLAN_INTERFACE_INFO));
 
         return info.InterfaceGuid;
-    }
-
-    static bool BssListContains(IntPtr bssListPtr, string targetMac)
-    {
-        int count = Marshal.ReadInt32(bssListPtr, 4);
-        long current = bssListPtr.ToInt64() + 8; // dwTotalSize + dwNumberOfItems
-        int entrySize = Marshal.SizeOf(typeof(WLAN_BSS_ENTRY));
-
-        for (int i = 0; i < count; i++)
-        {
-            IntPtr entryPtr = new IntPtr(current + i * entrySize);
-            WLAN_BSS_ENTRY entry = (WLAN_BSS_ENTRY)Marshal.PtrToStructure(entryPtr, typeof(WLAN_BSS_ENTRY));
-            string mac = MacToString(entry.dot11Bssid);
-            if (NormalizeMac(mac) == targetMac)
-                return true;
-        }
-
-        return false;
     }
 
     static DOT11_SSID MakeSsid(string ssid)
@@ -415,35 +560,26 @@ static class WifiNative
         return s;
     }
 
-    static string Dot11SsidToString(DOT11_SSID ssid)
-    {
-        int len = (int)ssid.uSSIDLength;
-        if (len < 0) len = 0;
-        if (len > 32) len = 32;
-        return Encoding.ASCII.GetString(ssid.ucSSID, 0, len);
-    }
-
     static string MacToString(byte[] mac)
     {
-        if (mac == null || mac.Length != 6) return "";
-        return string.Join(":", mac.Select(b => b.ToString("X2")));
-    }
+        if (mac == null || mac.Length != 6)
+            return "(ismeretlen)";
 
-    static string NormalizeMac(string mac)
-    {
-        if (string.IsNullOrWhiteSpace(mac)) return "";
-        return mac.Trim().ToUpperInvariant().Replace("-", ":");
+        return string.Join(":", mac.Select(b => b.ToString("X2")));
     }
 
     static byte[] ParseMac(string mac)
     {
-        string[] parts = NormalizeMac(mac).Split(':');
+        string[] parts = (mac ?? "").Trim().ToUpperInvariant().Replace("-", ":").Split(':');
+
         if (parts.Length != 6)
             throw new Exception("Hibás MAC/BSSID formátum: " + mac);
 
         byte[] bytes = new byte[6];
         for (int i = 0; i < 6; i++)
+        {
             bytes[i] = byte.Parse(parts[i], NumberStyles.HexNumber, CultureInfo.InvariantCulture);
+        }
 
         return bytes;
     }
@@ -451,18 +587,17 @@ static class WifiNative
     static IntPtr AllocSingleBssidList(byte[] mac)
     {
         // DOT11_BSSID_LIST:
-        // NDIS_OBJECT_HEADER (4 bytes) + uNumOfEntries(4) + uTotalNumOfEntries(4) + 6 bytes MAC
-        // Biztonság kedvéért 24 byte-ot foglalunk.
+        // header + counts + 1 db 6-byte MAC
         IntPtr ptr = Marshal.AllocHGlobal(24);
-        for (int i = 0; i < 24; i++) Marshal.WriteByte(ptr, i, 0);
+        for (int i = 0; i < 24; i++)
+            Marshal.WriteByte(ptr, i, 0);
 
-        // Header
-        Marshal.WriteByte(ptr, 0, 1);          // Type = NDIS_OBJECT_TYPE_DEFAULT
-        Marshal.WriteByte(ptr, 1, 1);          // Revision = 1
-        Marshal.WriteInt16(ptr, 2, 12);        // Size of header+counts region
+        Marshal.WriteByte(ptr, 0, 1);   // Type
+        Marshal.WriteByte(ptr, 1, 1);   // Revision
+        Marshal.WriteInt16(ptr, 2, 12); // Size
 
-        Marshal.WriteInt32(ptr, 4, 1);         // uNumOfEntries
-        Marshal.WriteInt32(ptr, 8, 1);         // uTotalNumOfEntries
+        Marshal.WriteInt32(ptr, 4, 1);  // uNumOfEntries
+        Marshal.WriteInt32(ptr, 8, 1);  // uTotalNumOfEntries
 
         for (int i = 0; i < 6; i++)
             Marshal.WriteByte(ptr, 12 + i, mac[i]);
@@ -475,8 +610,6 @@ static class WifiNative
         if (result != 0)
             throw new Exception(api + " hiba. Win32 kód: " + result);
     }
-
-    // ===== P/Invoke =====
 
     [DllImport("wlanapi.dll")]
     static extern uint WlanOpenHandle(
@@ -497,7 +630,14 @@ static class WifiNative
         out IntPtr ppInterfaceList);
 
     [DllImport("wlanapi.dll")]
-    static extern void WlanFreeMemory(IntPtr pMemory);
+    static extern void WlanFreeMemory(
+        IntPtr pMemory);
+
+    [DllImport("wlanapi.dll")]
+    static extern uint WlanDisconnect(
+        IntPtr hClientHandle,
+        ref Guid pInterfaceGuid,
+        IntPtr pReserved);
 
     [DllImport("wlanapi.dll")]
     static extern uint WlanScan(
@@ -506,16 +646,6 @@ static class WifiNative
         ref DOT11_SSID pDot11Ssid,
         IntPtr pIeData,
         IntPtr pReserved);
-
-    [DllImport("wlanapi.dll", CharSet = CharSet.Unicode)]
-    static extern uint WlanGetNetworkBssList(
-        IntPtr hClientHandle,
-        ref Guid pInterfaceGuid,
-        ref DOT11_SSID pDot11Ssid,
-        DOT11_BSS_TYPE dot11BssType,
-        [MarshalAs(UnmanagedType.Bool)] bool bSecurityEnabled,
-        IntPtr pReserved,
-        out IntPtr ppWlanBssList);
 
     [DllImport("wlanapi.dll", CharSet = CharSet.Unicode)]
     static extern uint WlanConnect(
@@ -610,33 +740,6 @@ struct WLAN_RATE_SET
 
     [MarshalAs(UnmanagedType.ByValArray, SizeConst = 126)]
     public ushort[] usRateSet;
-}
-
-[StructLayout(LayoutKind.Sequential)]
-struct WLAN_BSS_ENTRY
-{
-    public DOT11_SSID dot11Ssid;
-    public uint uPhyId;
-
-    [MarshalAs(UnmanagedType.ByValArray, SizeConst = 6)]
-    public byte[] dot11Bssid;
-
-    public DOT11_BSS_TYPE dot11BssType;
-    public uint dot11BssPhyType;
-    public int lRssi;
-    public uint uLinkQuality;
-
-    [MarshalAs(UnmanagedType.Bool)]
-    public bool bInRegDomain;
-
-    public ushort usBeaconPeriod;
-    public ulong ullTimestamp;
-    public ulong ullHostTimestamp;
-    public ushort usCapabilityInformation;
-    public uint ulChCenterFrequency;
-    public WLAN_RATE_SET wlanRateSet;
-    public uint ulIeOffset;
-    public uint ulIeSize;
 }
 
 [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
