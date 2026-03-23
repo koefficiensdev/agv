@@ -1,0 +1,591 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+
+namespace AgvBssidRoaming
+{
+    internal static class Program
+    {
+        // ===== ÁLLÍTSD EZEKET =====
+        private const string WifiProfileName = "SAJAT_WIFI_PROFIL"; // előre létrehozott Windows Wi-Fi profil neve
+        private const string TargetSsid = "SAJAT_SSID";             // opcionális, de ajánlott
+        private static readonly string[] AllowedBssids =
+        {
+            "AA:BB:CC:11:22:33",
+            "AA:BB:CC:11:22:44",
+            "AA:BB:CC:11:22:55"
+        };
+
+        private const int ScanIntervalMs = 2000;
+        private const int MinRssiToConnect = -85;   // ennél gyengébbre ne akarjon felülni
+        private const int RoamDeltaDbm = 8;         // csak akkor váltson, ha ennyivel jobb
+        private const bool ForceDisconnectBeforeConnect = true;
+
+        private static HashSet<string> _allowed;
+        private static string? _currentForcedBssid;
+
+        static void Main()
+        {
+            _allowed = new HashSet<string>(AllowedBssids.Select(NormalizeMac), StringComparer.OrdinalIgnoreCase);
+
+            uint negotiatedVersion;
+            IntPtr clientHandle;
+            ThrowIfError(WlanOpenHandle(2, IntPtr.Zero, out negotiatedVersion, out clientHandle), "WlanOpenHandle");
+
+            try
+            {
+                var iface = GetFirstWifiInterface(clientHandle);
+                Console.WriteLine($"Wi-Fi interface: {iface.strInterfaceDescription}");
+                Console.WriteLine("AGV BSSID roaming elindult...");
+
+                while (true)
+                {
+                    try
+                    {
+                        // friss scan
+                        WlanScan(clientHandle, ref iface.InterfaceGuid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                        Thread.Sleep(1000);
+
+                        var visible = GetVisibleBssEntries(clientHandle, iface.InterfaceGuid, TargetSsid);
+                        var candidates = visible
+                            .Where(x => _allowed.Contains(NormalizeMac(x.BssidString)))
+                            .OrderByDescending(x => x.Rssi)
+                            .ToList();
+
+                        if (candidates.Count == 0)
+                        {
+                            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Nincs találat az engedélyezett BSSID listából.");
+                            Thread.Sleep(ScanIntervalMs);
+                            continue;
+                        }
+
+                        var best = candidates[0];
+
+                        if (best.Rssi < MinRssiToConnect)
+                        {
+                            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Legjobb ismert AP túl gyenge: {best.BssidString}, RSSI={best.Rssi}");
+                            Thread.Sleep(ScanIntervalMs);
+                            continue;
+                        }
+
+                        var current = GetCurrentConnectionBssid(clientHandle, iface.InterfaceGuid);
+                        bool shouldRoam = false;
+
+                        if (current == null)
+                        {
+                            shouldRoam = true;
+                        }
+                        else if (!string.Equals(NormalizeMac(current.BssidString), NormalizeMac(best.BssidString), StringComparison.OrdinalIgnoreCase))
+                        {
+                            shouldRoam = best.Rssi >= current.Rssi + RoamDeltaDbm;
+                        }
+
+                        if (shouldRoam)
+                        {
+                            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Váltás erre: {best.BssidString}  RSSI={best.Rssi}");
+                            ConnectToSpecificBssid(clientHandle, iface.InterfaceGuid, WifiProfileName, TargetSsid, best.BssidBytes);
+                            _currentForcedBssid = best.BssidString;
+                        }
+                        else
+                        {
+                            if (current != null)
+                            {
+                                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Marad: {current.BssidString}  RSSI={current.Rssi} | Legjobb: {best.BssidString}  RSSI={best.Rssi}");
+                            }
+                            else
+                            {
+                                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Nem váltunk.");
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"HIBA: {ex.Message}");
+                    }
+
+                    Thread.Sleep(ScanIntervalMs);
+                }
+            }
+            finally
+            {
+                WlanCloseHandle(clientHandle, IntPtr.Zero);
+            }
+        }
+
+        // ===================== LOGIKA =====================
+
+        private static WLAN_INTERFACE_INFO GetFirstWifiInterface(IntPtr clientHandle)
+        {
+            IntPtr listPtr;
+            ThrowIfError(WlanEnumInterfaces(clientHandle, IntPtr.Zero, out listPtr), "WlanEnumInterfaces");
+
+            try
+            {
+                var header = Marshal.PtrToStructure<WLAN_INTERFACE_INFO_LIST_HEADER>(listPtr);
+                if (header.dwNumberOfItems == 0)
+                    throw new Exception("Nem található Wi-Fi interface.");
+
+                IntPtr itemPtr = listPtr + Marshal.SizeOf<WLAN_INTERFACE_INFO_LIST_HEADER>();
+                return Marshal.PtrToStructure<WLAN_INTERFACE_INFO>(itemPtr);
+            }
+            finally
+            {
+                WlanFreeMemory(listPtr);
+            }
+        }
+
+        private static List<BssCandidate> GetVisibleBssEntries(IntPtr clientHandle, Guid ifaceGuid, string ssid)
+        {
+            var result = new List<BssCandidate>();
+
+            IntPtr ssidPtr = IntPtr.Zero;
+            IntPtr bssListPtr = IntPtr.Zero;
+
+            try
+            {
+                var dot11Ssid = CreateDot11Ssid(ssid);
+                ssidPtr = Marshal.AllocHGlobal(Marshal.SizeOf<DOT11_SSID>());
+                Marshal.StructureToPtr(dot11Ssid, ssidPtr, false);
+
+                uint ret = WlanGetNetworkBssList(
+                    clientHandle,
+                    ref ifaceGuid,
+                    ssidPtr,
+                    DOT11_BSS_TYPE.dot11_BSS_type_infrastructure,
+                    false,
+                    IntPtr.Zero,
+                    out bssListPtr);
+
+                ThrowIfError(ret, "WlanGetNetworkBssList");
+
+                var header = Marshal.PtrToStructure<WLAN_BSS_LIST_HEADER>(bssListPtr);
+                IntPtr entryPtr = bssListPtr + Marshal.SizeOf<WLAN_BSS_LIST_HEADER>();
+
+                for (int i = 0; i < header.dwNumberOfItems; i++)
+                {
+                    var entry = Marshal.PtrToStructure<WLAN_BSS_ENTRY>(entryPtr);
+
+                    string entrySsid = GetStringFromSsid(entry.dot11Ssid);
+                    if (!string.Equals(entrySsid, ssid, StringComparison.Ordinal))
+                    {
+                        entryPtr += Marshal.SizeOf<WLAN_BSS_ENTRY>();
+                        continue;
+                    }
+
+                    byte[] mac = entry.dot11Bssid;
+                    string macStr = BitConverter.ToString(mac).Replace('-', ':');
+
+                    result.Add(new BssCandidate
+                    {
+                        Ssid = entrySsid,
+                        BssidBytes = mac,
+                        BssidString = macStr,
+                        Rssi = entry.lRssi,
+                        LinkQuality = entry.uLinkQuality
+                    });
+
+                    entryPtr += Marshal.SizeOf<WLAN_BSS_ENTRY>();
+                }
+
+                return result;
+            }
+            finally
+            {
+                if (ssidPtr != IntPtr.Zero) Marshal.FreeHGlobal(ssidPtr);
+                if (bssListPtr != IntPtr.Zero) WlanFreeMemory(bssListPtr);
+            }
+        }
+
+        private static BssCandidate? GetCurrentConnectionBssid(IntPtr clientHandle, Guid ifaceGuid)
+        {
+            IntPtr dataPtr = IntPtr.Zero;
+
+            try
+            {
+                uint dataSize;
+                WLAN_OPCODE_VALUE_TYPE opcode;
+                uint ret = WlanQueryInterface(
+                    clientHandle,
+                    ref ifaceGuid,
+                    WLAN_INTF_OPCODE.wlan_intf_opcode_current_connection,
+                    IntPtr.Zero,
+                    out dataSize,
+                    out dataPtr,
+                    out opcode);
+
+                if (ret != 0 || dataPtr == IntPtr.Zero)
+                    return null;
+
+                var conn = Marshal.PtrToStructure<WLAN_CONNECTION_ATTRIBUTES>(dataPtr);
+                string ssid = GetStringFromSsid(conn.wlanAssociationAttributes.dot11Ssid);
+                var mac = conn.wlanAssociationAttributes.dot11Bssid;
+                string macStr = BitConverter.ToString(mac).Replace('-', ':');
+
+                return new BssCandidate
+                {
+                    Ssid = ssid,
+                    BssidBytes = mac,
+                    BssidString = macStr,
+                    Rssi = 0, // current_connection itt nem ad RSSI-t
+                    LinkQuality = conn.wlanAssociationAttributes.wlanSignalQuality
+                };
+            }
+            finally
+            {
+                if (dataPtr != IntPtr.Zero)
+                    WlanFreeMemory(dataPtr);
+            }
+        }
+
+        private static void ConnectToSpecificBssid(IntPtr clientHandle, Guid ifaceGuid, string profileName, string ssid, byte[] bssid)
+        {
+            IntPtr ssidPtr = IntPtr.Zero;
+            IntPtr bssidListPtr = IntPtr.Zero;
+
+            try
+            {
+                if (ForceDisconnectBeforeConnect)
+                {
+                    WlanDisconnect(clientHandle, ref ifaceGuid, IntPtr.Zero);
+                    Thread.Sleep(500);
+                }
+
+                var dot11Ssid = CreateDot11Ssid(ssid);
+                ssidPtr = Marshal.AllocHGlobal(Marshal.SizeOf<DOT11_SSID>());
+                Marshal.StructureToPtr(dot11Ssid, ssidPtr, false);
+
+                bssidListPtr = BuildSingleBssidList(bssid);
+
+                var parameters = new WLAN_CONNECTION_PARAMETERS
+                {
+                    wlanConnectionMode = WLAN_CONNECTION_MODE.wlan_connection_mode_profile,
+                    strProfile = profileName,
+                    pDot11Ssid = ssidPtr,
+                    pDesiredBssidList = bssidListPtr,
+                    dot11BssType = DOT11_BSS_TYPE.dot11_BSS_type_infrastructure,
+                    dwFlags = 0
+                };
+
+                ThrowIfError(WlanConnect(clientHandle, ref ifaceGuid, ref parameters, IntPtr.Zero), "WlanConnect");
+            }
+            finally
+            {
+                if (ssidPtr != IntPtr.Zero) Marshal.FreeHGlobal(ssidPtr);
+                if (bssidListPtr != IntPtr.Zero) Marshal.FreeHGlobal(bssidListPtr);
+            }
+        }
+
+        private static DOT11_SSID CreateDot11Ssid(string ssid)
+        {
+            byte[] bytes = Encoding.ASCII.GetBytes(ssid);
+            if (bytes.Length > 32) throw new ArgumentException("SSID túl hosszú.");
+
+            var dot11 = new DOT11_SSID
+            {
+                uSSIDLength = (uint)bytes.Length,
+                ucSSID = new byte[32]
+            };
+
+            Array.Copy(bytes, dot11.ucSSID, bytes.Length);
+            return dot11;
+        }
+
+        private static string GetStringFromSsid(DOT11_SSID ssid)
+        {
+            if (ssid.ucSSID == null) return string.Empty;
+            return Encoding.ASCII.GetString(ssid.ucSSID, 0, (int)ssid.uSSIDLength);
+        }
+
+        private static IntPtr BuildSingleBssidList(byte[] mac)
+        {
+            if (mac == null || mac.Length != 6)
+                throw new ArgumentException("A BSSID 6 bájt kell legyen.");
+
+            int size = 4 + 4 + 4 + 6; // NDIS_OBJECT_HEADER + uNum + uTotal + 1 MAC
+            IntPtr ptr = Marshal.AllocHGlobal(size);
+
+            // nullázás
+            for (int i = 0; i < size; i++)
+                Marshal.WriteByte(ptr, i, 0);
+
+            // NDIS_OBJECT_HEADER
+            Marshal.WriteByte(ptr, 0, 0x80);                // NDIS_OBJECT_TYPE_DEFAULT
+            Marshal.WriteByte(ptr, 1, 1);                   // DOT11_BSSID_LIST_REVISION_1
+            Marshal.WriteInt16(ptr, 2, (short)size);       // Size
+
+            Marshal.WriteInt32(ptr, 4, 1);                  // uNumOfEntries
+            Marshal.WriteInt32(ptr, 8, 1);                  // uTotalNumOfEntries
+
+            for (int i = 0; i < 6; i++)
+                Marshal.WriteByte(ptr, 12 + i, mac[i]);
+
+            return ptr;
+        }
+
+        private static string NormalizeMac(string mac)
+        {
+            return mac.Trim().Replace("-", ":").ToUpperInvariant();
+        }
+
+        private static void ThrowIfError(uint code, string api)
+        {
+            if (code != 0)
+                throw new Exception($"{api} hiba. Kód: {code}");
+        }
+
+        // ===================== MODELLEK =====================
+
+        private sealed class BssCandidate
+        {
+            public string Ssid { get; set; } = "";
+            public byte[] BssidBytes { get; set; } = Array.Empty<byte>();
+            public string BssidString { get; set; } = "";
+            public int Rssi { get; set; }
+            public uint LinkQuality { get; set; }
+        }
+
+        // ===================== P/INVOKE =====================
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanOpenHandle(
+            uint dwClientVersion,
+            IntPtr pReserved,
+            out uint pdwNegotiatedVersion,
+            out IntPtr phClientHandle);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanCloseHandle(
+            IntPtr hClientHandle,
+            IntPtr pReserved);
+
+        [DllImport("wlanapi.dll")]
+        private static extern void WlanFreeMemory(IntPtr pMemory);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanEnumInterfaces(
+            IntPtr hClientHandle,
+            IntPtr pReserved,
+            out IntPtr ppInterfaceList);
+
+        [DllImport("wlanapi.dll", CharSet = CharSet.Unicode)]
+        private static extern uint WlanGetNetworkBssList(
+            IntPtr hClientHandle,
+            ref Guid pInterfaceGuid,
+            IntPtr pDot11Ssid,
+            DOT11_BSS_TYPE dot11BssType,
+            [MarshalAs(UnmanagedType.Bool)] bool bSecurityEnabled,
+            IntPtr pReserved,
+            out IntPtr ppWlanBssList);
+
+        [DllImport("wlanapi.dll", CharSet = CharSet.Unicode)]
+        private static extern uint WlanConnect(
+            IntPtr hClientHandle,
+            ref Guid pInterfaceGuid,
+            ref WLAN_CONNECTION_PARAMETERS pConnectionParameters,
+            IntPtr pReserved);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanDisconnect(
+            IntPtr hClientHandle,
+            ref Guid pInterfaceGuid,
+            IntPtr pReserved);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanScan(
+            IntPtr hClientHandle,
+            ref Guid pInterfaceGuid,
+            IntPtr pDot11Ssid,
+            IntPtr pIeData,
+            IntPtr pReserved);
+
+        [DllImport("wlanapi.dll")]
+        private static extern uint WlanQueryInterface(
+            IntPtr hClientHandle,
+            ref Guid pInterfaceGuid,
+            WLAN_INTF_OPCODE OpCode,
+            IntPtr pReserved,
+            out uint pdwDataSize,
+            out IntPtr ppData,
+            out WLAN_OPCODE_VALUE_TYPE pWlanOpcodeValueType);
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_INTERFACE_INFO_LIST_HEADER
+        {
+            public int dwNumberOfItems;
+            public int dwIndex;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WLAN_INTERFACE_INFO
+        {
+            public Guid InterfaceGuid;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+            public string strInterfaceDescription;
+
+            public WLAN_INTERFACE_STATE isState;
+        }
+
+        private enum WLAN_INTERFACE_STATE
+        {
+            wlan_interface_state_not_ready = 0,
+            wlan_interface_state_connected = 1,
+            wlan_interface_state_ad_hoc_network_formed = 2,
+            wlan_interface_state_disconnecting = 3,
+            wlan_interface_state_disconnected = 4,
+            wlan_interface_state_associating = 5,
+            wlan_interface_state_discovering = 6,
+            wlan_interface_state_authenticating = 7
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_BSS_LIST_HEADER
+        {
+            public uint dwTotalSize;
+            public uint dwNumberOfItems;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DOT11_SSID
+        {
+            public uint uSSIDLength;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 32)]
+            public byte[] ucSSID;
+        }
+
+        private enum DOT11_BSS_TYPE : uint
+        {
+            dot11_BSS_type_infrastructure = 1,
+            dot11_BSS_type_independent = 2,
+            dot11_BSS_type_any = 3
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_RATE_SET
+        {
+            public uint uRateSetLength;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 126)]
+            public ushort[] usRateSet;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_BSS_ENTRY
+        {
+            public DOT11_SSID dot11Ssid;
+            public uint uPhyId;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 6)]
+            public byte[] dot11Bssid;
+
+            public DOT11_BSS_TYPE dot11BssType;
+            public DOT11_PHY_TYPE dot11BssPhyType;
+            public int lRssi;
+            public uint uLinkQuality;
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool bInRegDomain;
+            public ushort usBeaconPeriod;
+            public ulong ullTimestamp;
+            public ulong ullHostTimestamp;
+            public ushort usCapabilityInformation;
+            public uint ulChCenterFrequency;
+            public WLAN_RATE_SET wlanRateSet;
+            public uint ulIeOffset;
+            public uint ulIeSize;
+        }
+
+        private enum DOT11_PHY_TYPE : uint
+        {
+            dot11_phy_type_unknown = 0,
+            dot11_phy_type_any = 0xFFFFFFFF
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WLAN_CONNECTION_PARAMETERS
+        {
+            public WLAN_CONNECTION_MODE wlanConnectionMode;
+
+            [MarshalAs(UnmanagedType.LPWStr)]
+            public string strProfile;
+
+            public IntPtr pDot11Ssid;
+            public IntPtr pDesiredBssidList;
+            public DOT11_BSS_TYPE dot11BssType;
+            public uint dwFlags;
+        }
+
+        private enum WLAN_CONNECTION_MODE
+        {
+            wlan_connection_mode_profile = 0,
+            wlan_connection_mode_temporary_profile,
+            wlan_connection_mode_discovery_secure,
+            wlan_connection_mode_discovery_unsecure,
+            wlan_connection_mode_auto,
+            wlan_connection_mode_invalid
+        }
+
+        private enum WLAN_INTF_OPCODE
+        {
+            wlan_intf_opcode_autoconf_enabled = 1,
+            wlan_intf_opcode_background_scan_enabled = 2,
+            wlan_intf_opcode_media_streaming_mode = 3,
+            wlan_intf_opcode_radio_state = 4,
+            wlan_intf_opcode_bss_type = 5,
+            wlan_intf_opcode_interface_state = 6,
+            wlan_intf_opcode_current_connection = 7
+        }
+
+        private enum WLAN_OPCODE_VALUE_TYPE
+        {
+            query_only = 0,
+            set_by_group_policy = 1,
+            set_by_user = 2,
+            invalid = 3
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_CONNECTION_ATTRIBUTES
+        {
+            public WLAN_INTERFACE_STATE isState;
+            public WLAN_CONNECTION_MODE wlanConnectionMode;
+
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 256)]
+            public string strProfileName;
+
+            public WLAN_ASSOCIATION_ATTRIBUTES wlanAssociationAttributes;
+            public WLAN_SECURITY_ATTRIBUTES wlanSecurityAttributes;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_ASSOCIATION_ATTRIBUTES
+        {
+            public DOT11_SSID dot11Ssid;
+            public DOT11_BSS_TYPE dot11BssType;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 6)]
+            public byte[] dot11Bssid;
+
+            public DOT11_PHY_TYPE dot11PhyType;
+            public uint uDot11PhyIndex;
+            public uint wlanSignalQuality;
+            public uint ulRxRate;
+            public uint ulTxRate;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct WLAN_SECURITY_ATTRIBUTES
+        {
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool bSecurityEnabled;
+            [MarshalAs(UnmanagedType.Bool)]
+            public bool bOneXEnabled;
+            public uint dot11AuthAlgorithm;
+            public uint dot11CipherAlgorithm;
+        }
+    }
+}
