@@ -5,13 +5,21 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
-namespace AgvReconnectOnly
+namespace AgvReconnectOnlyFixed
 {
     internal static class Program
     {
+        // =========================
+        // KONFIG
+        // =========================
+
+        // A Windows-ban már létező Wi-Fi profil neve
         private const string WifiProfileName = "SAJAT_WIFI_PROFIL";
+
+        // Az elvárt SSID
         private const string TargetSsid = "SAJAT_SSID";
 
+        // Csak ezekre a BSSID-kre csatlakozhat vissza
         private static readonly string[] AllowedBssids =
         {
             "AA:BB:CC:11:22:33",
@@ -19,49 +27,115 @@ namespace AgvReconnectOnly
             "AA:BB:CC:11:22:55"
         };
 
-        private const int LoopDelayMs = 2000;
-        private const int RetryDelayMs = 3000;
-        private const int MinRssiToUse = -85;
+        // Fő loop késleltetés
+        private const int MainLoopDelayMs = 2000;
+
+        // Ennyi egymás utáni tényleges disconnected állapot után indul reconnect
+        private const int DisconnectConfirmCount = 2;
+
+        // Scan utáni max várakozás, mert a WlanScan aszinkron
+        private const int ScanWaitTimeoutMs = 4500;
+        private const int ScanPollIntervalMs = 500;
+
+        // Minimális RSSI, aminél még megengedjük a visszacsatlakozást
+        private const int MinRssiToUse = -90;
+
+        // Hányszor próbálja meg a reconnect folyamatot
+        private const int ReconnectAttempts = 3;
+
+        // Két reconnect próbálkozás közt
+        private const int ReconnectAttemptDelayMs = 2000;
+
+        // Ha nagyon beragad, adapter reset fallback
+        private const bool EnableAdapterResetFallback = false;
+
+        // Opcionális fix interface név, ha nem akarod az első Wi-Fi interfészt használni.
+        // Ha üres, automatikusan az első Wi-Fi interfészt választja.
+        private const string PreferredInterfaceDescriptionContains = "";
+
+        // =========================
+        // BELSŐ ÁLLAPOT
+        // =========================
 
         private static HashSet<string> _allowed = null!;
+        private static int _disconnectCounter = 0;
 
         static void Main()
         {
+            Console.OutputEncoding = Encoding.UTF8;
+
             _allowed = new HashSet<string>(
                 AllowedBssids.Select(NormalizeMac),
                 StringComparer.OrdinalIgnoreCase);
 
+            Log("AGV reconnect-only watcher indul...");
+            Log("Engedélyezett BSSID-k:");
+            foreach (var b in _allowed)
+                Log($"  {b}");
+
             uint negotiatedVersion;
             IntPtr clientHandle;
-            ThrowIfError(WlanOpenHandle(2, IntPtr.Zero, out negotiatedVersion, out clientHandle), "WlanOpenHandle");
+
+            uint openRet = WlanOpenHandle(2, IntPtr.Zero, out negotiatedVersion, out clientHandle);
+            ThrowIfError(openRet, "WlanOpenHandle");
 
             try
             {
-                var iface = GetFirstWifiInterface(clientHandle);
-
-                Console.WriteLine($"Interface: {iface.strInterfaceDescription}");
-                Console.WriteLine("AGV reconnect-only watcher elindult...");
+                var iface = GetWifiInterface(clientHandle);
+                Log($"Wi-Fi interface: {iface.strInterfaceDescription}");
 
                 while (true)
                 {
                     try
                     {
-                        if (IsConnectedToTargetWifi(clientHandle, iface.InterfaceGuid, TargetSsid))
+                        var state = GetWifiState(clientHandle, iface.InterfaceGuid, TargetSsid);
+
+                        switch (state)
                         {
-                            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Wi-Fi OK, nincs teendő.");
-                        }
-                        else
-                        {
-                            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Wi-Fi leesett, reconnect indul...");
-                            TryReconnectToBestAllowedBssid(clientHandle, iface.InterfaceGuid);
+                            case WifiStateCheck.ConnectedToTarget:
+                                _disconnectCounter = 0;
+                                Log("Wi-Fi OK, csatlakozva a cél SSID-re.");
+                                break;
+
+                            case WifiStateCheck.ConnectedToOther:
+                                // Ha nálad ez nem probléma, ezt tekintheted OK-nak is.
+                                _disconnectCounter++;
+                                Log($"Másik SSID-n van. Számláló: {_disconnectCounter}/{DisconnectConfirmCount}");
+
+                                if (_disconnectCounter >= DisconnectConfirmCount)
+                                {
+                                    Log("Reconnect indul, mert nem a cél SSID-n van.");
+                                    ReconnectToBestAllowedBssid(clientHandle, iface);
+                                    _disconnectCounter = 0;
+                                }
+                                break;
+
+                            case WifiStateCheck.Disconnected:
+                                _disconnectCounter++;
+                                Log($"Wi-Fi disconnected. Számláló: {_disconnectCounter}/{DisconnectConfirmCount}");
+
+                                if (_disconnectCounter >= DisconnectConfirmCount)
+                                {
+                                    Log("Megerősített lecsatlakozás. Reconnect indul.");
+                                    ReconnectToBestAllowedBssid(clientHandle, iface);
+                                    _disconnectCounter = 0;
+                                }
+                                break;
+
+                            case WifiStateCheck.Unknown:
+                            default:
+                                // FONTOS: Unknown esetben nem reconnectelünk
+                                Log("Wi-Fi állapot ismeretlen, most nem csinál semmit.");
+                                _disconnectCounter = 0;
+                                break;
                         }
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"HIBA: {ex.Message}");
+                        Log($"FŐCIKLUS HIBA: {ex.Message}");
                     }
 
-                    Thread.Sleep(LoopDelayMs);
+                    Thread.Sleep(MainLoopDelayMs);
                 }
             }
             finally
@@ -70,42 +144,126 @@ namespace AgvReconnectOnly
             }
         }
 
-        private static void TryReconnectToBestAllowedBssid(IntPtr clientHandle, Guid ifaceGuid)
+        // =========================
+        // FŐ LOGIKA
+        // =========================
+
+        private static void ReconnectToBestAllowedBssid(IntPtr clientHandle, WLAN_INTERFACE_INFO iface)
         {
-            // Friss scan
-            ThrowIfError(WlanScan(clientHandle, ref ifaceGuid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero), "WlanScan");
-            Thread.Sleep(1500);
-
-            var visible = GetVisibleBssEntries(clientHandle, ifaceGuid, TargetSsid);
-
-            var best = visible
-                .Where(x => _allowed.Contains(NormalizeMac(x.BssidString)))
-                .Where(x => x.Rssi >= MinRssiToUse)
-                .OrderByDescending(x => x.Rssi)
-                .FirstOrDefault();
-
-            if (best == null)
+            for (int attempt = 1; attempt <= ReconnectAttempts; attempt++)
             {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] A megadott BSSID listából most semmi nem elérhető.");
-                return;
+                Log($"Reconnect próbálkozás {attempt}/{ReconnectAttempts}");
+
+                try
+                {
+                    // 1) Scan
+                    uint scanRet = WlanScan(clientHandle, ref iface.InterfaceGuid, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+                    if (scanRet != ERROR_SUCCESS)
+                    {
+                        Log($"WlanScan hiba: {scanRet}");
+                        if (scanRet == ERROR_ACCESS_DENIED)
+                        {
+                            Log("Valószínűleg location / jogosultság probléma. Nem tudok BSSID alapján választani.");
+                            return;
+                        }
+                    }
+
+                    // 2) Várunk, hogy legyen új scan eredmény
+                    var best = WaitAndPickBestAllowedBssid(clientHandle, iface.InterfaceGuid, TargetSsid, ScanWaitTimeoutMs);
+
+                    if (best == null)
+                    {
+                        Log("Nem látható egyetlen engedélyezett BSSID sem.");
+                        Thread.Sleep(ReconnectAttemptDelayMs);
+                        continue;
+                    }
+
+                    Log($"Legjobb találat: SSID='{best.Ssid}', BSSID={best.BssidString}, RSSI={best.Rssi}");
+
+                    // 3) Force connect konkrét BSSID-re
+                    ConnectToSpecificBssid(clientHandle, iface.InterfaceGuid, WifiProfileName, TargetSsid, best.BssidBytes);
+
+                    // 4) Várunk kicsit, majd ellenőrzünk
+                    Thread.Sleep(2500);
+
+                    var state = GetWifiState(clientHandle, iface.InterfaceGuid, TargetSsid);
+                    if (state == WifiStateCheck.ConnectedToTarget)
+                    {
+                        Log("Sikeres visszacsatlakozás.");
+                        return;
+                    }
+
+                    Log($"A csatlakozás még nem állt helyre. Aktuális állapot: {state}");
+                }
+                catch (Exception ex)
+                {
+                    Log($"Reconnect hiba: {ex.Message}");
+                }
+
+                Thread.Sleep(ReconnectAttemptDelayMs);
             }
 
-            Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Legjobb elérhető BSSID: {best.BssidString}, RSSI={best.Rssi}");
-            ConnectToSpecificBssid(clientHandle, ifaceGuid, WifiProfileName, TargetSsid, best.BssidBytes);
-
-            Thread.Sleep(RetryDelayMs);
-
-            if (IsConnectedToTargetWifi(clientHandle, ifaceGuid, TargetSsid))
+            if (EnableAdapterResetFallback)
             {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] Sikeres visszacsatlakozás.");
-            }
-            else
-            {
-                Console.WriteLine($"[{DateTime.Now:HH:mm:ss}] A reconnect nem sikerült.");
+                Log("Normál reconnect nem sikerült, adapter reset fallback indul.");
+
+                try
+                {
+                    ResetAdapterViaNetsh(iface.strInterfaceDescription);
+                    Thread.Sleep(3000);
+
+                    var best = WaitAndPickBestAllowedBssid(clientHandle, iface.InterfaceGuid, TargetSsid, ScanWaitTimeoutMs);
+                    if (best != null)
+                    {
+                        ConnectToSpecificBssid(clientHandle, iface.InterfaceGuid, WifiProfileName, TargetSsid, best.BssidBytes);
+                        Thread.Sleep(2500);
+
+                        var state = GetWifiState(clientHandle, iface.InterfaceGuid, TargetSsid);
+                        Log($"Reset utáni állapot: {state}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"Adapter reset fallback hiba: {ex.Message}");
+                }
             }
         }
 
-        private static bool IsConnectedToTargetWifi(IntPtr clientHandle, Guid ifaceGuid, string expectedSsid)
+        private static BssCandidate? WaitAndPickBestAllowedBssid(IntPtr clientHandle, Guid ifaceGuid, string targetSsid, int timeoutMs)
+        {
+            int waited = 0;
+
+            while (waited < timeoutMs)
+            {
+                var visible = GetVisibleBssEntries(clientHandle, ifaceGuid);
+
+                var candidates = visible
+                    .Where(x => string.Equals(x.Ssid, targetSsid, StringComparison.Ordinal))
+                    .Where(x => _allowed.Contains(NormalizeMac(x.BssidString)))
+                    .Where(x => x.Rssi >= MinRssiToUse)
+                    .OrderByDescending(x => x.Rssi)
+                    .ToList();
+
+                if (candidates.Count > 0)
+                {
+                    foreach (var c in candidates)
+                        Log($"Találat: {c.BssidString} | RSSI={c.Rssi} | Link={c.LinkQuality}");
+
+                    return candidates[0];
+                }
+
+                Thread.Sleep(ScanPollIntervalMs);
+                waited += ScanPollIntervalMs;
+            }
+
+            return null;
+        }
+
+        // =========================
+        // ÁLLAPOTELLENŐRZÉS
+        // =========================
+
+        private static WifiStateCheck GetWifiState(IntPtr clientHandle, Guid ifaceGuid, string expectedSsid)
         {
             IntPtr dataPtr = IntPtr.Zero;
 
@@ -123,16 +281,36 @@ namespace AgvReconnectOnly
                     out dataPtr,
                     out opcode);
 
-                if (ret != 0 || dataPtr == IntPtr.Zero)
-                    return false;
+                if (ret != ERROR_SUCCESS)
+                {
+                    Log($"WlanQueryInterface hiba: {ret}");
+                    if (ret == ERROR_ACCESS_DENIED)
+                        Log("Location / jogosultság gond lehet.");
+                    return WifiStateCheck.Unknown;
+                }
+
+                if (dataPtr == IntPtr.Zero)
+                    return WifiStateCheck.Unknown;
 
                 var conn = Marshal.PtrToStructure<WLAN_CONNECTION_ATTRIBUTES>(dataPtr);
 
                 if (conn.isState != WLAN_INTERFACE_STATE.wlan_interface_state_connected)
-                    return false;
+                    return WifiStateCheck.Disconnected;
 
                 string currentSsid = GetStringFromSsid(conn.wlanAssociationAttributes.dot11Ssid);
-                return string.Equals(currentSsid, expectedSsid, StringComparison.Ordinal);
+                string currentBssid = BitConverter.ToString(conn.wlanAssociationAttributes.dot11Bssid).Replace('-', ':');
+
+                Log($"Aktuális kapcsolat: SSID='{currentSsid}', BSSID={currentBssid}, Signal={conn.wlanAssociationAttributes.wlanSignalQuality}");
+
+                if (string.Equals(currentSsid, expectedSsid, StringComparison.Ordinal))
+                    return WifiStateCheck.ConnectedToTarget;
+
+                return WifiStateCheck.ConnectedToOther;
+            }
+            catch (Exception ex)
+            {
+                Log($"GetWifiState exception: {ex.Message}");
+                return WifiStateCheck.Unknown;
             }
             finally
             {
@@ -141,87 +319,77 @@ namespace AgvReconnectOnly
             }
         }
 
-        private static WLAN_INTERFACE_INFO GetFirstWifiInterface(IntPtr clientHandle)
-        {
-            IntPtr listPtr;
-            ThrowIfError(WlanEnumInterfaces(clientHandle, IntPtr.Zero, out listPtr), "WlanEnumInterfaces");
+        // =========================
+        // BSSID LEKÉRÉS
+        // =========================
 
-            try
-            {
-                var header = Marshal.PtrToStructure<WLAN_INTERFACE_INFO_LIST_HEADER>(listPtr);
-                if (header.dwNumberOfItems == 0)
-                    throw new Exception("Nem található Wi-Fi interface.");
-
-                IntPtr itemPtr = listPtr + Marshal.SizeOf<WLAN_INTERFACE_INFO_LIST_HEADER>();
-                return Marshal.PtrToStructure<WLAN_INTERFACE_INFO>(itemPtr);
-            }
-            finally
-            {
-                WlanFreeMemory(listPtr);
-            }
-        }
-
-        private static List<BssCandidate> GetVisibleBssEntries(IntPtr clientHandle, Guid ifaceGuid, string ssid)
+        private static List<BssCandidate> GetVisibleBssEntries(IntPtr clientHandle, Guid ifaceGuid)
         {
             var result = new List<BssCandidate>();
-
-            IntPtr ssidPtr = IntPtr.Zero;
             IntPtr bssListPtr = IntPtr.Zero;
 
             try
             {
-                var dot11Ssid = CreateDot11Ssid(ssid);
-                ssidPtr = Marshal.AllocHGlobal(Marshal.SizeOf<DOT11_SSID>());
-                Marshal.StructureToPtr(dot11Ssid, ssidPtr, false);
-
+                // FONTOS:
+                // pDot11Ssid = NULL -> az összes látott BSS
+                // így nem futunk bele SSID/security szűrési problémába
                 uint ret = WlanGetNetworkBssList(
                     clientHandle,
                     ref ifaceGuid,
-                    ssidPtr,
-                    DOT11_BSS_TYPE.dot11_BSS_type_infrastructure,
+                    IntPtr.Zero,
+                    DOT11_BSS_TYPE.dot11_BSS_type_any,
                     false,
                     IntPtr.Zero,
                     out bssListPtr);
 
-                ThrowIfError(ret, "WlanGetNetworkBssList");
+                if (ret != ERROR_SUCCESS)
+                {
+                    Log($"WlanGetNetworkBssList hiba: {ret}");
+                    if (ret == ERROR_ACCESS_DENIED)
+                        Log("Valószínű location / jogosultság probléma.");
+                    return result;
+                }
 
                 var header = Marshal.PtrToStructure<WLAN_BSS_LIST_HEADER>(bssListPtr);
-                IntPtr entryPtr = bssListPtr + Marshal.SizeOf<WLAN_BSS_LIST_HEADER>();
+                IntPtr entryPtr = IntPtr.Add(bssListPtr, Marshal.SizeOf<WLAN_BSS_LIST_HEADER>());
 
                 for (int i = 0; i < header.dwNumberOfItems; i++)
                 {
                     var entry = Marshal.PtrToStructure<WLAN_BSS_ENTRY>(entryPtr);
 
-                    string entrySsid = GetStringFromSsid(entry.dot11Ssid);
-                    if (string.Equals(entrySsid, ssid, StringComparison.Ordinal))
+                    string ssid = GetStringFromSsid(entry.dot11Ssid);
+                    string macStr = BitConverter.ToString(entry.dot11Bssid).Replace('-', ':');
+
+                    result.Add(new BssCandidate
                     {
-                        byte[] mac = entry.dot11Bssid;
-                        string macStr = BitConverter.ToString(mac).Replace('-', ':');
+                        Ssid = ssid,
+                        BssidBytes = entry.dot11Bssid.ToArray(),
+                        BssidString = macStr,
+                        Rssi = entry.lRssi,
+                        LinkQuality = entry.uLinkQuality
+                    });
 
-                        result.Add(new BssCandidate
-                        {
-                            Ssid = entrySsid,
-                            BssidBytes = mac,
-                            BssidString = macStr,
-                            Rssi = entry.lRssi,
-                            LinkQuality = entry.uLinkQuality
-                        });
-                    }
-
-                    entryPtr += Marshal.SizeOf<WLAN_BSS_ENTRY>();
+                    entryPtr = IntPtr.Add(entryPtr, Marshal.SizeOf<WLAN_BSS_ENTRY>());
                 }
 
                 return result;
             }
             finally
             {
-                if (ssidPtr != IntPtr.Zero) Marshal.FreeHGlobal(ssidPtr);
-                if (bssListPtr != IntPtr.Zero) WlanFreeMemory(bssListPtr);
+                if (bssListPtr != IntPtr.Zero)
+                    WlanFreeMemory(bssListPtr);
             }
         }
 
+        // =========================
+        // CONNECT
+        // =========================
+
         private static void ConnectToSpecificBssid(IntPtr clientHandle, Guid ifaceGuid, string profileName, string ssid, byte[] bssid)
         {
+            if (bssid == null || bssid.Length != 6)
+                throw new ArgumentException("A BSSID-nek 6 bájtosnak kell lennie.");
+
             IntPtr ssidPtr = IntPtr.Zero;
             IntPtr bssidListPtr = IntPtr.Zero;
 
@@ -231,7 +399,22 @@ namespace AgvReconnectOnly
                 ssidPtr = Marshal.AllocHGlobal(Marshal.SizeOf<DOT11_SSID>());
                 Marshal.StructureToPtr(dot11Ssid, ssidPtr, false);
 
-                bssidListPtr = BuildSingleBssidList(bssid);
+                var nativeBssidList = new DOT11_BSSID_LIST_SINGLE
+                {
+                    Header = new NDIS_OBJECT_HEADER
+                    {
+                        Type = NDIS_OBJECT_TYPE_DEFAULT,
+                        Revision = DOT11_BSSID_LIST_REVISION_1,
+                        Size = (ushort)Marshal.SizeOf<DOT11_BSSID_LIST_SINGLE>()
+                    },
+                    uNumOfEntries = 1,
+                    uTotalNumOfEntries = 1,
+                    BSSID0 = bssid,
+                    Padding = 0
+                };
+
+                bssidListPtr = Marshal.AllocHGlobal(Marshal.SizeOf<DOT11_BSSID_LIST_SINGLE>());
+                Marshal.StructureToPtr(nativeBssidList, bssidListPtr, false);
 
                 var parameters = new WLAN_CONNECTION_PARAMETERS
                 {
@@ -243,18 +426,72 @@ namespace AgvReconnectOnly
                     dwFlags = 0
                 };
 
-                ThrowIfError(WlanConnect(clientHandle, ref ifaceGuid, ref parameters, IntPtr.Zero), "WlanConnect");
+                uint ret = WlanConnect(clientHandle, ref ifaceGuid, ref parameters, IntPtr.Zero);
+                ThrowIfError(ret, "WlanConnect");
+                Log($"WlanConnect elküldve BSSID-re: {BitConverter.ToString(bssid).Replace('-', ':')}");
             }
             finally
             {
-                if (ssidPtr != IntPtr.Zero) Marshal.FreeHGlobal(ssidPtr);
-                if (bssidListPtr != IntPtr.Zero) Marshal.FreeHGlobal(bssidListPtr);
+                if (ssidPtr != IntPtr.Zero)
+                    Marshal.FreeHGlobal(ssidPtr);
+
+                if (bssidListPtr != IntPtr.Zero)
+                    Marshal.FreeHGlobal(bssidListPtr);
             }
         }
+
+        // =========================
+        // INTERFACE
+        // =========================
+
+        private static WLAN_INTERFACE_INFO GetWifiInterface(IntPtr clientHandle)
+        {
+            IntPtr listPtr;
+            uint ret = WlanEnumInterfaces(clientHandle, IntPtr.Zero, out listPtr);
+            ThrowIfError(ret, "WlanEnumInterfaces");
+
+            try
+            {
+                var header = Marshal.PtrToStructure<WLAN_INTERFACE_INFO_LIST_HEADER>(listPtr);
+                if (header.dwNumberOfItems <= 0)
+                    throw new Exception("Nem található Wi-Fi interface.");
+
+                IntPtr itemPtr = IntPtr.Add(listPtr, Marshal.SizeOf<WLAN_INTERFACE_INFO_LIST_HEADER>());
+                var all = new List<WLAN_INTERFACE_INFO>();
+
+                for (int i = 0; i < header.dwNumberOfItems; i++)
+                {
+                    var item = Marshal.PtrToStructure<WLAN_INTERFACE_INFO>(itemPtr);
+                    all.Add(item);
+                    itemPtr = IntPtr.Add(itemPtr, Marshal.SizeOf<WLAN_INTERFACE_INFO>());
+                }
+
+                if (!string.IsNullOrWhiteSpace(PreferredInterfaceDescriptionContains))
+                {
+                    var match = all.FirstOrDefault(x =>
+                        x.strInterfaceDescription?.IndexOf(PreferredInterfaceDescriptionContains, StringComparison.OrdinalIgnoreCase) >= 0);
+
+                    if (!match.Equals(default(WLAN_INTERFACE_INFO)))
+                        return match;
+                }
+
+                return all[0];
+            }
+            finally
+            {
+                WlanFreeMemory(listPtr);
+            }
+        }
+
+        // =========================
+        // SEGÉD
+        // =========================
 
         private static DOT11_SSID CreateDot11Ssid(string ssid)
         {
             byte[] bytes = Encoding.ASCII.GetBytes(ssid);
+            if (bytes.Length > 32)
+                throw new ArgumentException("SSID túl hosszú.");
 
             var dot11 = new DOT11_SSID
             {
@@ -268,31 +505,10 @@ namespace AgvReconnectOnly
 
         private static string GetStringFromSsid(DOT11_SSID ssid)
         {
+            if (ssid.ucSSID == null || ssid.uSSIDLength == 0)
+                return string.Empty;
+
             return Encoding.ASCII.GetString(ssid.ucSSID, 0, (int)ssid.uSSIDLength);
-        }
-
-        private static IntPtr BuildSingleBssidList(byte[] mac)
-        {
-            if (mac == null || mac.Length != 6)
-                throw new ArgumentException("A BSSID 6 byte kell legyen.");
-
-            int size = 4 + 4 + 4 + 6;
-            IntPtr ptr = Marshal.AllocHGlobal(size);
-
-            for (int i = 0; i < size; i++)
-                Marshal.WriteByte(ptr, i, 0);
-
-            Marshal.WriteByte(ptr, 0, 0x80);
-            Marshal.WriteByte(ptr, 1, 1);
-            Marshal.WriteInt16(ptr, 2, (short)size);
-
-            Marshal.WriteInt32(ptr, 4, 1);
-            Marshal.WriteInt32(ptr, 8, 1);
-
-            for (int i = 0; i < 6; i++)
-                Marshal.WriteByte(ptr, 12 + i, mac[i]);
-
-            return ptr;
         }
 
         private static string NormalizeMac(string mac)
@@ -300,10 +516,45 @@ namespace AgvReconnectOnly
             return mac.Trim().Replace("-", ":").ToUpperInvariant();
         }
 
+        private static void ResetAdapterViaNetsh(string interfaceName)
+        {
+            RunHidden("netsh", $"interface set interface name=\"{interfaceName}\" admin=disable");
+            Thread.Sleep(1500);
+            RunHidden("netsh", $"interface set interface name=\"{interfaceName}\" admin=enable");
+        }
+
+        private static void RunHidden(string fileName, string arguments)
+        {
+            using var p = new System.Diagnostics.Process();
+            p.StartInfo.FileName = fileName;
+            p.StartInfo.Arguments = arguments;
+            p.StartInfo.CreateNoWindow = true;
+            p.StartInfo.UseShellExecute = false;
+            p.Start();
+            p.WaitForExit();
+        }
+
         private static void ThrowIfError(uint code, string api)
         {
-            if (code != 0)
+            if (code != ERROR_SUCCESS)
                 throw new Exception($"{api} hiba. Kód: {code}");
+        }
+
+        private static void Log(string message)
+        {
+            Console.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}");
+        }
+
+        // =========================
+        // ENUMEK / MODELLEK
+        // =========================
+
+        private enum WifiStateCheck
+        {
+            Unknown = 0,
+            Disconnected = 1,
+            ConnectedToOther = 2,
+            ConnectedToTarget = 3
         }
 
         private sealed class BssCandidate
@@ -314,6 +565,20 @@ namespace AgvReconnectOnly
             public int Rssi { get; set; }
             public uint LinkQuality { get; set; }
         }
+
+        // =========================
+        // NATIVE CONST
+        // =========================
+
+        private const uint ERROR_SUCCESS = 0;
+        private const uint ERROR_ACCESS_DENIED = 5;
+
+        private const byte NDIS_OBJECT_TYPE_DEFAULT = 0x80;
+        private const byte DOT11_BSSID_LIST_REVISION_1 = 1;
+
+        // =========================
+        // P/INVOKE
+        // =========================
 
         [DllImport("wlanapi.dll")]
         private static extern uint WlanOpenHandle(
@@ -446,8 +711,10 @@ namespace AgvReconnectOnly
             public DOT11_PHY_TYPE dot11BssPhyType;
             public int lRssi;
             public uint uLinkQuality;
+
             [MarshalAs(UnmanagedType.Bool)]
             public bool bInRegDomain;
+
             public ushort usBeaconPeriod;
             public ulong ullTimestamp;
             public ulong ullHostTimestamp;
@@ -541,10 +808,34 @@ namespace AgvReconnectOnly
         {
             [MarshalAs(UnmanagedType.Bool)]
             public bool bSecurityEnabled;
+
             [MarshalAs(UnmanagedType.Bool)]
             public bool bOneXEnabled;
+
             public uint dot11AuthAlgorithm;
             public uint dot11CipherAlgorithm;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NDIS_OBJECT_HEADER
+        {
+            public byte Type;
+            public byte Revision;
+            public ushort Size;
+        }
+
+        // Egyetlen BSSID-s natív lista
+        [StructLayout(LayoutKind.Sequential)]
+        private struct DOT11_BSSID_LIST_SINGLE
+        {
+            public NDIS_OBJECT_HEADER Header;
+            public uint uNumOfEntries;
+            public uint uTotalNumOfEntries;
+
+            [MarshalAs(UnmanagedType.ByValArray, SizeConst = 6)]
+            public byte[] BSSID0;
+
+            public ushort Padding;
         }
     }
 }
