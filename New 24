@@ -1,0 +1,299 @@
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Net.NetworkInformation;
+using System.Text;
+using System.Threading;
+
+namespace AgvPingReconnect
+{
+    internal static class Program
+    {
+        // ====== EZEKET ÁLLÍTSD BE ======
+        private const string WifiInterfaceName = "Wi-Fi";
+        private const string WifiProfileName = "SAJAT_WIFI_PROFIL";
+        private const string TargetSsid = "SAJAT_SSID";
+        private const string ServerIpToPing = "192.168.1.100";
+
+        // ====== FINOMHANGOLÁS ======
+        private const int PingIntervalMs = 1000;
+        private const int PingTimeoutMs = 700;
+        private const int FailedPingThreshold = 2;
+        private const int SoftReconnectAttempts = 2;
+        private const int ReconnectWaitMs = 2500;
+        private const int AdapterResetWaitMs = 4000;
+        private const bool VerbosePingLogging = true;
+
+        private static int _failedPingCount = 0;
+        private static bool _reconnectInProgress = false;
+        private static readonly object _logLock = new object();
+        private static string _logFilePath = "";
+
+        static void Main()
+        {
+            Console.OutputEncoding = Encoding.UTF8;
+            _logFilePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "agv_wifi_log.txt");
+
+            Log("==================================================");
+            Log("AGV ping alapú reconnect watcher elindult");
+            Log("Log file: " + _logFilePath);
+            Log("Ping cél: " + ServerIpToPing);
+            Log("Interface: " + WifiInterfaceName);
+            Log("Profil: " + WifiProfileName);
+            Log("SSID: " + TargetSsid);
+            Log("==================================================");
+
+            while (true)
+            {
+                try
+                {
+                    bool pingOk = PingHost(ServerIpToPing, PingTimeoutMs);
+
+                    if (pingOk)
+                    {
+                        if (_failedPingCount > 0)
+                        {
+                            Log($"Ping újra sikeres. Előző hibaszámláló nullázva. (előző érték: {_failedPingCount})");
+                        }
+                        else if (VerbosePingLogging)
+                        {
+                            Log("Ping OK.");
+                        }
+
+                        _failedPingCount = 0;
+                    }
+                    else
+                    {
+                        _failedPingCount++;
+                        Log($"Ping sikertelen. Számláló: {_failedPingCount}/{FailedPingThreshold}");
+
+                        if (_failedPingCount == 1)
+                        {
+                            Log("Kapcsolati probléma észlelve.");
+                        }
+
+                        if (_failedPingCount >= FailedPingThreshold && !_reconnectInProgress)
+                        {
+                            _reconnectInProgress = true;
+
+                            try
+                            {
+                                Log("Lehetséges lecsatlakozás megerősítve.");
+                                HandleReconnect();
+                            }
+                            finally
+                            {
+                                _failedPingCount = 0;
+                                _reconnectInProgress = false;
+                                Log("Reconnect ciklus vége, hibaszámláló nullázva.");
+                            }
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log("Főciklus hiba: " + ex);
+                }
+
+                Thread.Sleep(PingIntervalMs);
+            }
+        }
+
+        private static void HandleReconnect()
+        {
+            Log("Újracsatlakozási folyamat indul.");
+
+            for (int i = 1; i <= SoftReconnectAttempts; i++)
+            {
+                Log($"Soft reconnect próbálkozás {i}/{SoftReconnectAttempts} indul.");
+
+                bool connectCommandOk = ConnectToWifiProfile();
+
+                if (!connectCommandOk)
+                {
+                    Log($"Soft reconnect {i}/{SoftReconnectAttempts}: connect parancs hibával tért vissza.");
+                }
+                else
+                {
+                    Log($"Soft reconnect {i}/{SoftReconnectAttempts}: connect parancs lefutott.");
+                }
+
+                Thread.Sleep(ReconnectWaitMs);
+
+                bool pingOk = PingHost(ServerIpToPing, PingTimeoutMs);
+                if (pingOk)
+                {
+                    Log($"Soft reconnect {i}/{SoftReconnectAttempts}: SIKERES. A ping helyreállt.");
+                    return;
+                }
+
+                Log($"Soft reconnect {i}/{SoftReconnectAttempts}: sikertelen. Még mindig nincs ping válasz.");
+            }
+
+            Log("A soft reconnect próbálkozások nem hozták vissza a kapcsolatot.");
+            Log("Adapter reset indul.");
+
+            bool resetOk = ResetWifiAdapter();
+            if (resetOk)
+            {
+                Log("Adapter reset parancsok lefutottak.");
+            }
+            else
+            {
+                Log("Adapter reset során hiba történt.");
+            }
+
+            Thread.Sleep(AdapterResetWaitMs);
+
+            Log("Adapter reset után új connect próbálkozás indul.");
+            bool connectAfterResetOk = ConnectToWifiProfile();
+
+            if (!connectAfterResetOk)
+            {
+                Log("Reset utáni connect parancs hibával tért vissza.");
+            }
+            else
+            {
+                Log("Reset utáni connect parancs lefutott.");
+            }
+
+            Thread.Sleep(ReconnectWaitMs);
+
+            bool finalPingOk = PingHost(ServerIpToPing, PingTimeoutMs);
+            if (finalPingOk)
+            {
+                Log("Adapter reset utáni visszacsatlakozás SIKERES.");
+            }
+            else
+            {
+                Log("Adapter reset után sincs ping válasz. A kapcsolat NEM állt helyre.");
+            }
+        }
+
+        private static bool ConnectToWifiProfile()
+        {
+            try
+            {
+                Log("Wi-Fi csatlakozás indítása a megadott profilra/SSID-re.");
+                int exitCode = RunCommand(
+                    "netsh",
+                    $"wlan connect name=\"{WifiProfileName}\" ssid=\"{TargetSsid}\" interface=\"{WifiInterfaceName}\"");
+
+                Thread.Sleep(1200);
+
+                return exitCode == 0;
+            }
+            catch (Exception ex)
+            {
+                Log("ConnectToWifiProfile hiba: " + ex);
+                return false;
+            }
+        }
+
+        private static bool ResetWifiAdapter()
+        {
+            try
+            {
+                Log("Wi-Fi adapter letiltása indul.");
+                int disableExit = RunCommand("netsh", $"interface set interface name=\"{WifiInterfaceName}\" admin=disable");
+
+                Thread.Sleep(1500);
+
+                Log("Wi-Fi adapter visszaengedése indul.");
+                int enableExit = RunCommand("netsh", $"interface set interface name=\"{WifiInterfaceName}\" admin=enable");
+
+                return disableExit == 0 && enableExit == 0;
+            }
+            catch (Exception ex)
+            {
+                Log("ResetWifiAdapter hiba: " + ex);
+                return false;
+            }
+        }
+
+        private static bool PingHost(string host, int timeoutMs)
+        {
+            try
+            {
+                using (var ping = new Ping())
+                {
+                    PingReply reply = ping.Send(host, timeoutMs);
+
+                    if (reply != null && reply.Status == IPStatus.Success)
+                    {
+                        if (VerbosePingLogging)
+                        {
+                            Log($"Ping success: host={host}, time={reply.RoundtripTime}ms");
+                        }
+
+                        return true;
+                    }
+
+                    string status = reply == null ? "null_reply" : reply.Status.ToString();
+                    Log($"Ping fail: host={host}, status={status}");
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"Ping exception: host={host}, ex={ex.Message}");
+                return false;
+            }
+        }
+
+        private static int RunCommand(string fileName, string arguments)
+        {
+            using (var process = new Process())
+            {
+                process.StartInfo.FileName = fileName;
+                process.StartInfo.Arguments = arguments;
+                process.StartInfo.RedirectStandardOutput = true;
+                process.StartInfo.RedirectStandardError = true;
+                process.StartInfo.UseShellExecute = false;
+                process.StartInfo.CreateNoWindow = true;
+
+                Log($"Parancs fut: {fileName} {arguments}");
+
+                process.Start();
+
+                string stdOut = process.StandardOutput.ReadToEnd();
+                string stdErr = process.StandardError.ReadToEnd();
+
+                process.WaitForExit();
+
+                if (!string.IsNullOrWhiteSpace(stdOut))
+                {
+                    Log("CMD OUT: " + stdOut.Trim().Replace(Environment.NewLine, " | "));
+                }
+
+                if (!string.IsNullOrWhiteSpace(stdErr))
+                {
+                    Log("CMD ERR: " + stdErr.Trim().Replace(Environment.NewLine, " | "));
+                }
+
+                Log($"Parancs vége. ExitCode={process.ExitCode}");
+
+                return process.ExitCode;
+            }
+        }
+
+        private static void Log(string message)
+        {
+            string line = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}";
+
+            lock (_logLock)
+            {
+                Console.WriteLine(line);
+
+                try
+                {
+                    File.AppendAllText(_logFilePath, line + Environment.NewLine, Encoding.UTF8);
+                }
+                catch
+                {
+                    // Direkt üresen hagyva: ha a logolás hibázik, a program attól még fusson tovább.
+                }
+            }
+        }
+    }
+}
